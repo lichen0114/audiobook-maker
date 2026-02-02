@@ -3,3 +3,10 @@
 __pycache__/
 *.pyc
 .DS_Store
+*.mp3
+
+# Node.js / CLI
+node_modules/
+cli/node_modules/
+cli/dist/
+.package-lock.json
