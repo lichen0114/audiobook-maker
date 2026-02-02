@@ -44,23 +44,27 @@ export function runTTS(
             '--lang_code', config.langCode,
             '--chunk_chars', config.chunkChars.toString(),
             '--workers', (config.workers || 2).toString(),
+            '--backend', config.backend || 'pytorch',
             '--no_rich', // Disable rich progress bar to prevent CLI flashing
         ];
+
+        // Only set PyTorch MPS env vars for the pytorch backend
+        const isPyTorchBackend = (config.backend || 'pytorch') === 'pytorch';
+        const mpsEnvVars = isPyTorchBackend && config.useMPS ? {
+            PYTORCH_ENABLE_MPS_FALLBACK: '1',
+            // MPS memory optimization - aggressive cleanup for 8GB Macs
+            PYTORCH_MPS_HIGH_WATERMARK_RATIO: '0.0',
+            // Limit thread parallelism to reduce GIL contention
+            OMP_NUM_THREADS: '4',
+            OPENBLAS_NUM_THREADS: '2',
+        } : {};
 
         const process = spawn(venvPython, args, {
             cwd: projectRoot,
             env: {
                 ...globalThis.process.env,
                 PYTHONUNBUFFERED: '1',
-                // Enable Apple Silicon GPU acceleration when useMPS is true
-                ...(config.useMPS ? {
-                    PYTORCH_ENABLE_MPS_FALLBACK: '1',
-                    // MPS memory optimization - aggressive cleanup for 8GB Macs
-                    PYTORCH_MPS_HIGH_WATERMARK_RATIO: '0.0',
-                    // Limit thread parallelism to reduce GIL contention
-                    OMP_NUM_THREADS: '4',
-                    OPENBLAS_NUM_THREADS: '2',
-                } : {}),
+                ...mpsEnvVars,
             },
         });
 

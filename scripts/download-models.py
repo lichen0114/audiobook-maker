@@ -96,6 +96,40 @@ def check_model_cache():
     return False
 
 
+def download_mlx_model():
+    """Download the MLX Kokoro model if mlx-audio is installed."""
+    print_step("Checking for MLX-Audio backend...")
+
+    try:
+        from mlx_audio.tts.models.kokoro import KokoroPipeline
+        print_info("MLX-Audio is installed, downloading MLX model...")
+    except ImportError:
+        print_info("MLX-Audio not installed, skipping MLX model download.")
+        print_info("Install with: pip install -r requirements-mlx.txt")
+        return True  # Not an error, just optional
+
+    try:
+        print_info("Initializing MLX Kokoro pipeline (downloading model if needed)...")
+        pipeline = KokoroPipeline(lang_code='a')
+
+        # Generate a tiny sample to ensure it works
+        print_info("Testing MLX voice synthesis...")
+        test_text = "Hello."
+        generator = pipeline(test_text, voice='af_heart', speed=1.0)
+
+        # Just get the first chunk to verify it works
+        for _, _, _ in generator:
+            break
+
+        print_success("MLX model is ready!")
+        return True
+
+    except Exception as e:
+        print_error(f"Failed to download MLX model: {e}")
+        print_info("MLX backend may not work correctly.")
+        return False
+
+
 def main():
     print(f"\n{Colors.BOLD}🎧 AI Audiobook Fast - Model Downloader{Colors.NC}\n")
 
@@ -104,11 +138,16 @@ def main():
         print_info("Kokoro model appears to be cached already.")
         print_info("Running download anyway to ensure it's complete...\n")
 
-    # Download/verify the model
+    # Download/verify the PyTorch model
     success = download_kokoro_model()
+
+    # Try to download MLX model (optional)
+    mlx_success = download_mlx_model()
 
     if success:
         print(f"\n{Colors.GREEN}{Colors.BOLD}✨ All models are ready!{Colors.NC}")
+        if not mlx_success:
+            print(f"{Colors.DIM}Note: MLX model download was skipped or failed.{Colors.NC}")
         print(f"{Colors.DIM}You can now run: cd cli && npm run dev{Colors.NC}\n")
         return 0
     else:

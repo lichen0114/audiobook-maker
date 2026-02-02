@@ -1,0 +1,3 @@
+# Optional MLX backend for faster TTS on Apple Silicon
+# Install with: pip install -r requirements-mlx.txt
+mlx-audio>=0.2.3

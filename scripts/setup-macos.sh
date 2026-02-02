@@ -386,6 +386,41 @@ install_cli_deps() {
 }
 
 # ============================================================================
+# Optional: Install MLX Backend
+# ============================================================================
+
+offer_mlx_install() {
+    echo ""
+    echo -e "${CYAN}${BOLD}▶ Optional: Install MLX Backend${NC}"
+    echo ""
+    echo -e "  MLX is Apple's optimized ML framework for Apple Silicon."
+    echo -e "  It provides significantly faster TTS inference (often >20x real-time)"
+    echo -e "  compared to PyTorch on M1/M2/M3/M4 Macs."
+    echo ""
+    echo -e "  ${DIM}Note: MLX only works on Apple Silicon Macs.${NC}"
+    echo ""
+
+    read -p "  Install MLX-Audio backend? [y/N]: " -n 1 -r
+    echo ""
+
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo ""
+        echo -e "  ${YELLOW}Installing MLX-Audio...${NC}"
+        echo -e "  ${DIM}(This may take a few minutes)${NC}"
+        echo ""
+
+        local venv_pip="$PROJECT_ROOT/.venv/bin/pip"
+        "$venv_pip" install -r "$PROJECT_ROOT/requirements-mlx.txt"
+
+        print_success "MLX backend installed!"
+        print_info "You can select it in the CLI under 'Backend' configuration."
+    else
+        print_info "Skipping MLX installation. You can install it later with:"
+        print_info "  pip install -r requirements-mlx.txt"
+    fi
+}
+
+# ============================================================================
 # Optional: Pre-download TTS Models
 # ============================================================================
 
@@ -478,6 +513,7 @@ main() {
     setup_python_venv
     install_python_deps
     install_cli_deps
+    offer_mlx_install
     offer_model_download
 
     print_success_message

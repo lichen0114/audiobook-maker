@@ -168,6 +168,53 @@ function checkAppScript(): PreflightCheck {
 }
 
 /**
+ * Check if MLX backend dependencies are installed
+ * This is a warning check - MLX is optional
+ */
+export function checkMLXDeps(): PreflightCheck {
+    const projectRoot = getProjectRoot();
+    const venvPython = path.join(projectRoot, '.venv', 'bin', 'python');
+
+    if (!fs.existsSync(venvPython)) {
+        return {
+            name: 'MLX Backend',
+            status: 'warning',
+            message: 'Python venv not found (cannot check MLX)',
+        };
+    }
+
+    try {
+        // Check if mlx-audio is importable
+        const result = spawnSync(venvPython, ['-c', 'from mlx_audio.tts.models.kokoro import KokoroPipeline'], {
+            encoding: 'utf-8',
+            timeout: 10000,
+        });
+
+        if (result.status !== 0) {
+            return {
+                name: 'MLX Backend',
+                status: 'warning',
+                message: 'MLX-Audio not installed (optional)',
+                fix: 'pip install -r requirements-mlx.txt',
+            };
+        }
+
+        return {
+            name: 'MLX Backend',
+            status: 'ok',
+            message: 'MLX-Audio ready',
+        };
+    } catch {
+        return {
+            name: 'MLX Backend',
+            status: 'warning',
+            message: 'Failed to check MLX dependencies',
+            fix: 'pip install -r requirements-mlx.txt',
+        };
+    }
+}
+
+/**
  * Run all preflight checks
  */
 export function runPreflightChecks(): PreflightResult {

@@ -21,7 +21,16 @@
       "Bash(cat:*)",
       "Bash(chmod:*)",
       "Bash(bash:*)",
-      "Bash(/Users/wanglichen/Desktop/startup/ai_audiobook_fast/scripts/check-python.sh:*)"
+      "Bash(/Users/wanglichen/Desktop/startup/ai_audiobook_fast/scripts/check-python.sh:*)",
+      "Bash(git log:*)",
+      "WebFetch(domain:docs.pytorch.org)",
+      "Bash(grep:*)",
+      "Bash(wc:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(pytest:*)",
+      "Bash(npx tsc:*)",
+      "Bash(python app.py:*)",
+      "Bash(ffprobe:*)"
     ]
   }
 }

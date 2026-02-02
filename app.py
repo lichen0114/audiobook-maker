@@ -8,13 +8,12 @@ import time
 import threading
 from dataclasses import dataclass
 from queue import Queue
-from typing import Iterable, List, Tuple, Optional
+from typing import List, Tuple, Optional
 
 import numpy as np
 from bs4 import BeautifulSoup
 import ebooklib
 from ebooklib import epub
-from kokoro import KPipeline
 from pydub import AudioSegment
 from rich.progress import (
     BarColumn,
@@ -24,8 +23,10 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from backends import create_backend, TTSBackend
 
-SAMPLE_RATE = 24000
+
+DEFAULT_SAMPLE_RATE = 24000
 
 
 @dataclass
@@ -110,7 +111,7 @@ def audio_to_int16(audio) -> np.ndarray:
     return audio
 
 
-def audio_to_segment(audio: np.ndarray, rate: int = SAMPLE_RATE) -> AudioSegment:
+def audio_to_segment(audio: np.ndarray, rate: int = DEFAULT_SAMPLE_RATE) -> AudioSegment:
     """Convert numpy int16 array to AudioSegment."""
     if audio.dtype != np.int16:
         audio = audio_to_int16(audio)
@@ -125,7 +126,7 @@ def audio_to_segment(audio: np.ndarray, rate: int = SAMPLE_RATE) -> AudioSegment
 def export_pcm_to_mp3(
     pcm_data: np.ndarray,
     output_path: str,
-    sample_rate: int = SAMPLE_RATE,
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
     bitrate: str = "192k",
 ) -> None:
     """Export raw PCM int16 data directly to MP3 via ffmpeg.
@@ -163,18 +164,6 @@ def export_pcm_to_mp3(
         raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode()}")
 
 
-def generate_audio_segments(
-    pipeline: KPipeline,
-    text: str,
-    voice: str,
-    speed: float,
-    split_pattern: str,
-) -> Iterable[np.ndarray]:
-    generator = pipeline(text, voice=voice, speed=speed, split_pattern=split_pattern)
-    for _, _, audio in generator:
-        yield audio
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="EPUB to MP3 using Kokoro TTS")
     parser.add_argument("--input", required=True, help="Path to input EPUB")
@@ -204,6 +193,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable rich progress bar (for CLI integration)",
     )
+    parser.add_argument(
+        "--backend",
+        choices=["pytorch", "mlx"],
+        default="pytorch",
+        help="TTS backend to use (default: pytorch)",
+    )
     return parser.parse_args()
 
 
@@ -230,7 +225,10 @@ def main() -> None:
     if not chunks:
         raise ValueError("No text chunks produced from EPUB.")
 
-    pipeline = KPipeline(lang_code=args.lang_code)
+    # Initialize the TTS backend
+    backend = create_backend(args.backend)
+    backend.initialize(lang_code=args.lang_code)
+    sample_rate = backend.sample_rate
     total_chunks = len(chunks)
 
     # Store results as int16 numpy arrays (not AudioSegments) for O(n) concatenation
@@ -277,7 +275,7 @@ def main() -> None:
     encoder_thread = threading.Thread(target=encoding_worker, daemon=True)
     encoder_thread.start()
 
-    print(f"Processing {total_chunks} chunks (sequential GPU + background encoding)", flush=True)
+    print(f"Processing {total_chunks} chunks with {backend.name} backend (sequential inference + background encoding)", flush=True)
 
     # Phase: Inference
     print("PHASE:INFERENCE", flush=True)
@@ -292,9 +290,8 @@ def main() -> None:
             # Status: Inference
             print(f"WORKER:0:INFER:Chunk {idx+1}/{total_chunks}", flush=True)
 
-            # GPU inference - sequential for MPS (no benefit from threading)
-            for audio in generate_audio_segments(
-                pipeline=pipeline,
+            # Inference - sequential for optimal performance
+            for audio in backend.generate(
                 text=chunk.text,
                 voice=args.voice,
                 speed=args.speed,
@@ -355,9 +352,12 @@ def main() -> None:
 
     # Phase: Exporting
     print("PHASE:EXPORTING", flush=True)
-    export_pcm_to_mp3(combined_np, args.output, sample_rate=SAMPLE_RATE, bitrate="192k")
+    export_pcm_to_mp3(combined_np, args.output, sample_rate=sample_rate, bitrate="192k")
 
     avg_time = sum(times) / max(len(times), 1)
+
+    # Cleanup backend resources
+    backend.cleanup()
 
     print("\nDone.")
     print(f"Output: {args.output}")

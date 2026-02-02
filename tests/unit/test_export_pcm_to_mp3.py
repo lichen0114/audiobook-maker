@@ -10,7 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from app import export_pcm_to_mp3, SAMPLE_RATE
+from app import export_pcm_to_mp3, DEFAULT_SAMPLE_RATE
 
 
 @pytest.mark.unit

@@ -22,6 +22,7 @@ export interface TTSConfig {
     useMPS: boolean;
     outputDir: string | null; // null means same directory as input
     workers: number; // Number of parallel workers for audio encoding
+    backend: 'pytorch' | 'mlx'; // TTS backend to use
 }
 
 export interface FileJob {
@@ -48,6 +49,7 @@ const defaultConfig: TTSConfig = {
     useMPS: true, // Enable Apple Silicon GPU acceleration by default
     outputDir: null,
     workers: 2, // Use 2 parallel workers by default (optimal for Apple Silicon MPS)
+    backend: 'pytorch', // Default to PyTorch backend
 };
 
 function formatBytes(bytes: number): string {

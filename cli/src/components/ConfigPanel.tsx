@@ -35,12 +35,18 @@ const speeds = [
     { label: '🚀 1.5x - Very Fast', value: '1.5' },
 ];
 
-type ConfigStep = 'voice' | 'speed' | 'workers' | 'gpu' | 'output' | 'output_custom' | 'confirm';
+const backends = [
+    { label: '🔥 PyTorch/MPS (Stable)', value: 'pytorch' },
+    { label: '⚡ MLX (Faster - Experimental)', value: 'mlx' },
+];
+
+type ConfigStep = 'voice' | 'speed' | 'backend' | 'workers' | 'gpu' | 'output' | 'output_custom' | 'confirm';
 
 export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelProps) {
     const [step, setStep] = useState<ConfigStep>('voice');
     const [selectedVoice, setSelectedVoice] = useState(config.voice);
     const [selectedSpeed, setSelectedSpeed] = useState(config.speed);
+    const [selectedBackend, setSelectedBackend] = useState<'pytorch' | 'mlx'>(config.backend || 'pytorch');
     const [selectedWorkers, setSelectedWorkers] = useState(config.workers || 2);
     const [useMPS, setUseMPS] = useState(config.useMPS);
     const [outputDir, setOutputDir] = useState<string | null>(config.outputDir);
@@ -59,12 +65,29 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
 
     const handleSpeedSelect = (item: { value: string }) => {
         setSelectedSpeed(parseFloat(item.value));
-        setStep('workers');
+        setStep('backend');
+    };
+
+    const handleBackendSelect = (item: { value: string }) => {
+        const backend = item.value as 'pytorch' | 'mlx';
+        setSelectedBackend(backend);
+        // MLX natively uses Apple Silicon, so skip GPU step
+        if (backend === 'mlx') {
+            setUseMPS(true); // MLX always uses Apple Silicon
+            setStep('workers');
+        } else {
+            setStep('workers');
+        }
     };
 
     const handleWorkerSelect = (item: { value: string }) => {
         setSelectedWorkers(parseInt(item.value));
-        setStep('gpu');
+        // Skip GPU step for MLX backend (it always uses Apple Silicon)
+        if (selectedBackend === 'mlx') {
+            setStep('output');
+        } else {
+            setStep('gpu');
+        }
     };
 
     const handleGPUSelect = (item: { value: string }) => {
@@ -95,6 +118,7 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                 ...config,
                 voice: selectedVoice,
                 speed: selectedSpeed,
+                backend: selectedBackend,
                 workers: selectedWorkers,
                 useMPS,
                 outputDir,
@@ -103,6 +127,8 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
             setStep('voice');
         } else if (item.value === 'speed') {
             setStep('speed');
+        } else if (item.value === 'backend') {
+            setStep('backend');
         } else if (item.value === 'workers') {
             setStep('workers');
         } else if (item.value === 'gpu') {
@@ -117,6 +143,9 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
 
     const getSpeedLabel = (value: number) =>
         speeds.find(s => parseFloat(s.value) === value)?.label || `${value}x`;
+
+    const getBackendLabel = (value: string) =>
+        backends.find(b => b.value === value)?.label || value;
 
     const getOutputLabel = () => {
         if (!outputDir) return 'Same as input file';
@@ -150,6 +179,9 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                         ⚡ Speed: <Text color={step === 'speed' ? 'yellow' : 'green'}>{getSpeedLabel(selectedSpeed)}</Text>
                     </Text>
                     <Text>
+                        🧠 Backend: <Text color={step === 'backend' ? 'yellow' : 'green'}>{getBackendLabel(selectedBackend)}</Text>
+                    </Text>
+                    <Text>
                         🔨 Workers: <Text color={step === 'workers' ? 'yellow' : 'green'}>{selectedWorkers}</Text>
                     </Text>
                     <Text>
@@ -180,6 +212,21 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                             items={speeds}
                             onSelect={handleSpeedSelect}
                             initialIndex={speeds.findIndex(s => s.value === '1.0')}
+                        />
+                    </Box>
+                </Box>
+            )}
+
+            {/* Backend Selection */}
+            {step === 'backend' && (
+                <Box flexDirection="column">
+                    <Text color="yellow" bold>Select TTS backend:</Text>
+                    <Text dimColor>MLX is faster on Apple Silicon but requires mlx-audio to be installed</Text>
+                    <Box marginTop={1}>
+                        <SelectInput
+                            items={backends}
+                            onSelect={handleBackendSelect}
+                            initialIndex={backends.findIndex(b => b.value === selectedBackend)}
                         />
                     </Box>
                 </Box>
@@ -265,8 +312,9 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                                 { label: '✅ Start Processing', value: 'start' },
                                 { label: '🎙️  Change Voice', value: 'voice' },
                                 { label: '⚡ Change Speed', value: 'speed' },
+                                { label: '🧠 Change Backend', value: 'backend' },
                                 { label: '🔨 Change Workers', value: 'workers' },
-                                { label: '🍎 Toggle GPU Acceleration', value: 'gpu' },
+                                ...(selectedBackend === 'pytorch' ? [{ label: '🍎 Toggle GPU Acceleration', value: 'gpu' }] : []),
                                 { label: '📁 Change Output Directory', value: 'output' },
                             ]}
                             onSelect={handleConfirm}
