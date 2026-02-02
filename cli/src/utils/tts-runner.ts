@@ -42,9 +42,9 @@ export function runTTS(
         process.stdout.on('data', (data: Buffer) => {
             const output = data.toString();
 
-            // Parse progress from rich progress bar output
-            // Looking for patterns like "42/100 chunks" or percentages
-            const chunkMatch = output.match(/(\d+)\/(\d+)\s*chunks/);
+            // Parse progress from explicit PROGRESS output or rich progress bar
+            // Looking for patterns like "PROGRESS:42/100 chunks" or "42/100 chunks"
+            const chunkMatch = output.match(/(?:PROGRESS:)?(\d+)\/(\d+)\s*chunks/);
             if (chunkMatch) {
                 const current = parseInt(chunkMatch[1], 10);
                 const total = parseInt(chunkMatch[2], 10);

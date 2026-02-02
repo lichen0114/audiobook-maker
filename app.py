@@ -185,6 +185,8 @@ def main() -> None:
             times.append(elapsed)
 
             progress.update(task_id, advance=1)
+            # Explicit progress output for CLI parsing
+            print(f"PROGRESS:{len(times)}/{total_chunks} chunks", flush=True)
 
     output_dir = os.path.dirname(os.path.abspath(args.output))
     if output_dir and not os.path.exists(output_dir):
