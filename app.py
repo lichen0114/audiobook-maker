@@ -94,9 +94,12 @@ def audio_to_int16(audio) -> np.ndarray:
     Optimized to avoid unnecessary GPU→CPU transfers when tensor is already on CPU.
     """
     if torch is not None and isinstance(audio, torch.Tensor):
+        # Always detach to handle tensors with requires_grad=True
         # Only move to CPU if on MPS/CUDA
         if audio.device.type != 'cpu':
             audio = audio.detach().cpu()
+        else:
+            audio = audio.detach()
         audio = audio.numpy()
     elif not isinstance(audio, np.ndarray):
         audio = np.asarray(audio)

@@ -1,7 +1,7 @@
 {
   "name": "audiobook-maker-cli",
   "version": "1.0.0",
-  "description": "✨ Beautiful CLI for converting EPUBs to audiobooks",
+  "description": "Beautiful CLI for converting EPUBs to audiobooks",
   "type": "module",
   "bin": {
     "audiobook": "./dist/index.js"
@@ -11,7 +11,10 @@
     "dev:mps": "PYTORCH_ENABLE_MPS_FALLBACK=1 tsx src/index.tsx",
     "build": "tsc",
     "start": "node dist/index.js",
-    "start:mps": "PYTORCH_ENABLE_MPS_FALLBACK=1 node dist/index.js"
+    "start:mps": "PYTORCH_ENABLE_MPS_FALLBACK=1 node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "chalk": "^5.3.0",
@@ -26,10 +29,15 @@
     "react": "^18.2.0"
   },
   "devDependencies": {
+    "@testing-library/react": "^14.2.1",
     "@types/node": "^20.19.30",
     "@types/react": "^18.3.27",
+    "@vitejs/plugin-react": "^4.2.1",
+    "@vitest/coverage-v8": "^1.2.2",
+    "ink-testing-library": "^4.0.0",
     "tsx": "^4.7.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.2"
   },
   "engines": {
     "node": ">=18"

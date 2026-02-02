@@ -1,0 +1,143 @@
+"""Tests for the parse_args function."""
+
+import pytest
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from app import parse_args
+
+
+@pytest.mark.unit
+class TestParseArgs:
+    """Test cases for parse_args function."""
+
+    def test_required_args(self):
+        """Should parse required arguments."""
+        with patch("sys.argv", ["app.py", "--input", "book.epub", "--output", "book.mp3"]):
+            args = parse_args()
+
+            assert args.input == "book.epub"
+            assert args.output == "book.mp3"
+
+    def test_default_values(self):
+        """Should use default values when not specified."""
+        with patch("sys.argv", ["app.py", "--input", "test.epub", "--output", "test.mp3"]):
+            args = parse_args()
+
+            assert args.voice == "af_heart"
+            assert args.lang_code == "a"
+            assert args.speed == 1.0
+            assert args.chunk_chars == 1200
+            assert args.split_pattern == r"\n+"
+            assert args.workers == 2
+            assert args.no_rich is False
+
+    def test_custom_voice(self):
+        """Should accept custom voice."""
+        with patch("sys.argv", [
+            "app.py", "--input", "test.epub", "--output", "test.mp3",
+            "--voice", "bf_emma"
+        ]):
+            args = parse_args()
+            assert args.voice == "bf_emma"
+
+    def test_custom_speed(self):
+        """Should accept custom speed."""
+        with patch("sys.argv", [
+            "app.py", "--input", "test.epub", "--output", "test.mp3",
+            "--speed", "1.5"
+        ]):
+            args = parse_args()
+            assert args.speed == 1.5
+
+    def test_custom_chunk_chars(self):
+        """Should accept custom chunk_chars."""
+        with patch("sys.argv", [
+            "app.py", "--input", "test.epub", "--output", "test.mp3",
+            "--chunk_chars", "2000"
+        ]):
+            args = parse_args()
+            assert args.chunk_chars == 2000
+
+    def test_custom_workers(self):
+        """Should accept custom workers count."""
+        with patch("sys.argv", [
+            "app.py", "--input", "test.epub", "--output", "test.mp3",
+            "--workers", "4"
+        ]):
+            args = parse_args()
+            assert args.workers == 4
+
+    def test_no_rich_flag(self):
+        """Should accept --no_rich flag."""
+        with patch("sys.argv", [
+            "app.py", "--input", "test.epub", "--output", "test.mp3",
+            "--no_rich"
+        ]):
+            args = parse_args()
+            assert args.no_rich is True
+
+    def test_custom_lang_code(self):
+        """Should accept custom lang_code."""
+        with patch("sys.argv", [
+            "app.py", "--input", "test.epub", "--output", "test.mp3",
+            "--lang_code", "b"
+        ]):
+            args = parse_args()
+            assert args.lang_code == "b"
+
+    def test_custom_split_pattern(self):
+        """Should accept custom split_pattern."""
+        with patch("sys.argv", [
+            "app.py", "--input", "test.epub", "--output", "test.mp3",
+            "--split_pattern", r"\.\s+"
+        ]):
+            args = parse_args()
+            assert args.split_pattern == r"\.\s+"
+
+    def test_missing_required_args(self):
+        """Should fail when required args missing."""
+        with patch("sys.argv", ["app.py"]):
+            with pytest.raises(SystemExit):
+                parse_args()
+
+    def test_missing_input(self):
+        """Should fail when --input missing."""
+        with patch("sys.argv", ["app.py", "--output", "test.mp3"]):
+            with pytest.raises(SystemExit):
+                parse_args()
+
+    def test_missing_output(self):
+        """Should fail when --output missing."""
+        with patch("sys.argv", ["app.py", "--input", "test.epub"]):
+            with pytest.raises(SystemExit):
+                parse_args()
+
+    def test_all_args_combined(self):
+        """Should handle all arguments together."""
+        with patch("sys.argv", [
+            "app.py",
+            "--input", "my_book.epub",
+            "--output", "my_audiobook.mp3",
+            "--voice", "am_michael",
+            "--speed", "1.25",
+            "--lang_code", "a",
+            "--chunk_chars", "1500",
+            "--split_pattern", r"\n+",
+            "--workers", "3",
+            "--no_rich",
+        ]):
+            args = parse_args()
+
+            assert args.input == "my_book.epub"
+            assert args.output == "my_audiobook.mp3"
+            assert args.voice == "am_michael"
+            assert args.speed == 1.25
+            assert args.lang_code == "a"
+            assert args.chunk_chars == 1500
+            assert args.split_pattern == r"\n+"
+            assert args.workers == 3
+            assert args.no_rich is True
