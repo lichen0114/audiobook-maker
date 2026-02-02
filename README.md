@@ -58,22 +58,22 @@ Live GPU usage visualization with sparklines (Apple Silicon)
 </td>
 <td>
 
-🧩 **Worker Thread Visualization**
-Watch inference and encoding threads work in parallel real-time
+🧩 **Pipeline Visualization**
+Watch GPU inference and background encoding progress in real-time
 
 </td>
 </tr>
 <tr>
 <td>
 
-🚀 **Parallel Processing**
-Multi-worker pipeline maximizes GPU/CPU utilization for 2-3x faster conversion
+🚀 **Optimized Pipeline**
+Sequential GPU inference + background encoding for maximum throughput on Apple Silicon
 
 </td>
 <td>
 
 🔧 **Highly Configurable**
-Tune chunk size, worker count, and more for optimal performance
+Tune chunk size and more for optimal performance
 
 </td>
 </tr>
@@ -230,12 +230,10 @@ python app.py --input /path/to/book.epub --output /path/to/book.mp3
 │                                     │
 ╰─────────────────────────────────────╯
 
-╭− 👷 Workers (4) ────────────────────╮
+╭− 👷 Processing ─────────────────────╮
 │                                     │
-│  Worker 0: INFER  Chunk 15/35       │
-│  Worker 1: ENCODE Chunk 14          │
-│  Worker 2: IDLE                     │
-│  Worker 3: IDLE                     │
+│  GPU: INFER  Chunk 15/35            │
+│  Encoder: Converting to int16       │
 │                                     │
 ╰─────────────────────────────────────╯
 
@@ -268,21 +266,23 @@ For a detailed technical overview of the project structure and data flow, please
 
 ## 📝 Technical Notes
 
-- **Parallel Processing** — Uses async producer-consumer pipeline with multiple worker threads
+- **Optimized Pipeline** — Sequential GPU inference (main thread) + background CPU encoding thread. This avoids GPU contention that slows down multi-threaded approaches on MPS
+- **O(n) Audio Assembly** — Stores int16 numpy arrays during processing, concatenates once at the end (vs O(n²) AudioSegment concatenation)
 - **Audio Export** — Uses FFmpeg via `pydub` for high-quality MP3 encoding
 - **ETA Calculation** — Based on rolling average, stabilizes after first few chunks
 - **Output Naming** — Files are saved with the same name as input (`.epub` → `.mp3`)
-- **GPU Support** — Apple Silicon Macs can use MPS acceleration for 2-3x faster processing
+- **GPU Support** — Apple Silicon Macs use MPS acceleration with optimized memory settings
 
 ### Performance Tips
 
 ```bash
 # For maximum speed on Apple Silicon:
-PYTORCH_ENABLE_MPS_FALLBACK=1 python app.py --input book.epub --output book.mp3 --workers 4
+python app.py --input book.epub --output book.mp3
 ```
 
-- Increase `--workers` (4-8) for faster audio encoding
-- Increase `--chunk_chars` (2000-3000) for fewer chunks to process
+- **Workers**: On Apple Silicon, 1-2 workers is optimal. The GPU serializes operations via MPS, so more workers add overhead without speedup
+- **Chunk size**: Increase `--chunk_chars` (2000-3000) for fewer chunks and less overhead
+- **Memory**: The optimized pipeline uses O(n) audio concatenation, keeping memory usage flat even for large books
 
 ---
 

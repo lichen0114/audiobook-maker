@@ -57,52 +57,63 @@ graph TD
     Runner -->|Update State| UI
 ```
 
-## Parallel Processing Strategy
+## Processing Strategy
 
-To maximize performance, especially on machines with capable GPUs (like Apple Silicon), the system employs a parallel processing pipeline.
+The system uses an optimized single-threaded GPU inference model with background CPU encoding. This design was chosen because **threading provides no speedup for GPU work on Apple Silicon** — MPS serializes GPU operations, causing multiple workers to queue up waiting for GPU access.
 
-### Producer-Consumer Pattern
-- **Producer**: The main thread reads the EPUB, cleans the text, and splits it into optimal chunks (default ~1200 chars). These chunks are pushed into a thread-safe `queue.Queue`.
-- **Consumers**: Multiple worker threads (default: 2) pull chunks from the queue and process them independently.
+### Architecture: Sequential GPU + Background Encoding
+- **Main Thread (GPU-bound)**: Processes chunks sequentially through the Kokoro pipeline. Each audio segment is immediately queued for encoding.
+- **Background Thread (CPU-bound)**: Converts raw audio tensors to int16 numpy arrays asynchronously, allowing GPU inference to continue without waiting.
 
-### Worker Lifecycle
-Each worker performs two distinct stages for every chunk:
-1.  **Inference (GPU-bound)**: The worker uses the `kokoro` pipeline to generate raw audio data. On Apple Silicon, this leverages MPS (Metal Performance Shaders) for acceleration.
-2.  **Encoding (CPU-bound)**: The raw audio is converted to an `AudioSegment` (16-bit PCM, 24kHz) using `pydub`/`numpy`.
+### Why Not Multi-threaded GPU Workers?
+Testing showed that concurrent GPU execution on MPS is actually **0.88x slower** than sequential due to:
+- MPS/PyTorch GPU serialization (operations queue up anyway)
+- GIL contention with multiple Python threads
+- Lock overhead for thread coordination
 
-### Synchronization
-- **Results Storage**: Completed audio segments are stored in a dictionary keyed by chunk index (`results_dict`). A `threading.Lock` facilitates safe concurrent writes.
-- **Ordered Assembly**: After all chunks are processed, the main thread reassembles the audio segments in the correct order (0 to N) to ensure the audiobook flows correctly.
-- **Console Output**: A dedicated `print_lock` ensures that status updates from multiple threads (e.g., `WORKER:0:INFER...`) do not interleave and corrupt the output parsing by the CLI.
+### O(n) Audio Assembly
+Previous implementations used O(n²) concatenation (`combined += segment`), which copies all data on each iteration. The optimized approach:
+1. Stores raw int16 numpy arrays during processing (not AudioSegments)
+2. Uses `np.concatenate(all_arrays)` at the end (single memory allocation)
+3. Creates one AudioSegment from the combined numpy array
 
+This provides ~11x speedup for the assembly phase on large books.
+
+### Data Flow
 ```mermaid
 sequenceDiagram
-    participant Main as Main Thread
-    participant Queue
-    participant W1 as Worker 1
-    participant W2 as Worker 2
+    participant Main as Main Thread (GPU)
+    participant Queue as Encoding Queue
+    participant Encoder as Background Encoder
     participant Results as Results Dict
 
-    Main->>Queue: Put Chunk 1
-    Main->>Queue: Put Chunk 2
-    
-    par Worker Processing
-        W1->>Queue: Get Chunk 1
-        W2->>Queue: Get Chunk 2
-        W1->>W1: Inference (GPU)
-        W2->>W2: Inference (GPU)
-        W1->>W1: Encoding (CPU)
-        W2->>W2: Encoding (CPU)
-        W1->>Results: Store Segment 1
-        W2->>Results: Store Segment 2
-    end
-    
-    Main->>Results: Retrieve All Segments
-    Main->>Main: Assemble Audiobook
+    Main->>Main: Load chunk 1
+    Main->>Main: GPU Inference
+    Main->>Queue: Queue audio tensor
+    Encoder->>Queue: Get tensor
+    Encoder->>Encoder: Convert to int16
+    Encoder->>Results: Store numpy array
+
+    Main->>Main: Load chunk 2
+    Main->>Main: GPU Inference
+    Main->>Queue: Queue audio tensor
+    Note over Main,Encoder: GPU and encoding overlap
+
+    Main->>Queue: Send stop signal
+    Encoder->>Encoder: Finish remaining
+    Main->>Results: np.concatenate all arrays
+    Main->>Main: Export to MP3
 ```
 
+### MPS Optimization Environment Variables
+When MPS is enabled, the CLI sets these environment variables:
+- `PYTORCH_ENABLE_MPS_FALLBACK=1` — Allow CPU fallback for unsupported ops
+- `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0` — Aggressive memory cleanup (helps 8GB Macs)
+- `OMP_NUM_THREADS=4` — Limit OpenMP threads (reduces GIL contention)
+- `OPENBLAS_NUM_THREADS=2` — Limit BLAS parallelism
 
-## Data Flow
+
+## High-Level Data Flow
 
 The data flow pipeline transforms an EPUB file into a single MP3 audio file.
 
@@ -110,36 +121,36 @@ The data flow pipeline transforms an EPUB file into a single MP3 audio file.
 sequenceDiagram
     participant EPUB as EPUB File
     participant Parser as Text Parser
-    participant Queue as Chunk Queue
-    participant Workers as Worker Threads (GPU/CPU)
-    participant Merger as Audio Merger
+    participant GPU as Main Thread (GPU)
+    participant Encoder as Background Encoder
     participant MP3 as Final Output
 
     EPUB->>Parser: Extract Chapters & Text
     Parser->>Parser: Clean & Normalize Text
-    Parser->>Queue: Split into Chunks (<1200 chars)
-    
-    loop Parallel Processing
-        Queue->>Workers: Valid Text Chunk
-        Workers->>Workers: Inference (GPU/Kokoro)
-        Workers->>Workers: Encoding (CPU/Pydub)
-        Workers-->>Merger: Audio Segment
+    Parser->>GPU: Split into Chunks (<1200 chars)
+
+    loop Sequential Processing
+        GPU->>GPU: Inference (Kokoro/MPS)
+        GPU->>Encoder: Queue audio tensor
+        Encoder->>Encoder: Convert to int16 numpy
     end
 
-    Merger->>Merger: Concatenate All Segments
-    Merger->>MP3: Export to MP3
+    GPU->>GPU: np.concatenate all arrays
+    GPU->>MP3: Export to MP3
 ```
 
 ## Key Components
 
 ### 1. Python Backend (`app.py`)
-- **Libraries**: `kokoro` (TTS), `ebooklib` (EPUB), `pydub` (Audio), `torch`.
-- **Concurrency**: Uses `threading` to run multiple workers. Each worker handles both inference (GPU-bound) and encoding (CPU-bound) for a chunk.
-- **IPC**: Prints structured logs (e.g., `WORKER:0:INFER:...`) to `stdout` which the CLI parses.
+- **Libraries**: `kokoro` (TTS), `ebooklib` (EPUB), `pydub` (Audio), `torch`, `numpy`.
+- **Concurrency**: Single-threaded GPU inference with one background encoding thread. Avoids GPU contention issues from multi-threaded approaches.
+- **Optimization**: `audio_to_int16()` only moves tensors to CPU when on MPS/CUDA (avoids unnecessary transfers).
+- **IPC**: Prints structured logs (e.g., `WORKER:0:INFER:...`, `PROGRESS:N/M chunks`) to `stdout` which the CLI parses.
 
 ### 2. CLI Frontend (`cli/`)
 - **Stack**: `React`, `Ink`, `TypeScript`.
-- **Responsibility**: 
-    - Argument parsing.
-    - Process management (spawning `app.py`).
-    - Visualizing workers status and overall progress.
+- **Responsibility**:
+    - Argument parsing and configuration UI.
+    - Process management (spawning `app.py` with MPS environment variables).
+    - Visualizing processing status and overall progress.
+    - Bounded stderr buffer (10KB max) to prevent memory leaks on long runs.
