@@ -260,6 +260,12 @@ python app.py --input /path/to/book.epub --output /path/to/book.mp3
 
 ---
 
+## 🏗️ Architecture
+
+For a detailed technical overview of the project structure and data flow, please refer to [ARCHITECTURE.md](ARCHITECTURE.md).
+
+---
+
 ## 📝 Technical Notes
 
 - **Parallel Processing** — Uses async producer-consumer pipeline with multiple worker threads
