@@ -187,6 +187,7 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
                     paddingX={2}
                     paddingY={1}
                     marginBottom={1}
+                    width="100%"
                 >
                     <Box>
                         <Text dimColor>Currently Processing: </Text>
@@ -215,6 +216,7 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
                 paddingX={2}
                 paddingY={1}
                 marginBottom={1}
+                width="100%"
             >
                 <Box justifyContent="space-between">
                     <Box>
