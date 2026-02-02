@@ -5,6 +5,7 @@ import { FileSelector } from './components/FileSelector.js';
 import { ConfigPanel } from './components/ConfigPanel.js';
 import { BatchProgress } from './components/BatchProgress.js';
 import { WelcomeScreen } from './components/WelcomeScreen.js';
+import { KeyboardHint, DONE_HINTS, PROCESSING_HINTS } from './components/KeyboardHint.js';
 import { exec } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -32,6 +33,9 @@ export interface FileJob {
     error?: string;
     outputSize?: number; // in bytes
     processingTime?: number; // in ms
+    totalChars?: number; // total characters processed
+    avgChunkTimeMs?: number; // average chunk time in ms
+    startTime?: number; // processing start timestamp
 }
 
 const defaultConfig: TTSConfig = {
@@ -136,6 +140,14 @@ export function App() {
     const completedFiles = files.filter(f => f.status === 'done');
     const errorFiles = files.filter(f => f.status === 'error');
     const totalOutputSize = completedFiles.reduce((acc, f) => acc + (f.outputSize || 0), 0);
+    const totalCharsProcessed = completedFiles.reduce((acc, f) => acc + (f.totalChars || 0), 0);
+    const totalChunksProcessed = completedFiles.reduce((acc, f) => acc + (f.totalChunks || 0), 0);
+    const avgChunkTimeOverall = completedFiles.length > 0
+        ? completedFiles.reduce((acc, f) => acc + (f.avgChunkTimeMs || 0), 0) / completedFiles.length
+        : 0;
+    const processingSpeed = totalTime > 0 && totalCharsProcessed > 0
+        ? Math.round(totalCharsProcessed / (totalTime / 1000))
+        : 0;
 
     return (
         <Box flexDirection="column" padding={1}>
@@ -201,6 +213,30 @@ export function App() {
                                 <Text dimColor>Processing time: </Text>
                                 <Text color="yellow" bold>{formatDuration(totalTime)}</Text>
                             </Box>
+                            {totalCharsProcessed > 0 && (
+                                <>
+                                    <Box>
+                                        <Text dimColor>Total characters: </Text>
+                                        <Text color="cyan">{totalCharsProcessed.toLocaleString()}</Text>
+                                    </Box>
+                                    <Box>
+                                        <Text dimColor>Processing speed: </Text>
+                                        <Text color="green" bold>{processingSpeed.toLocaleString()} chars/sec</Text>
+                                    </Box>
+                                </>
+                            )}
+                            {totalChunksProcessed > 0 && (
+                                <Box>
+                                    <Text dimColor>Total chunks: </Text>
+                                    <Text color="cyan">{totalChunksProcessed}</Text>
+                                    {avgChunkTimeOverall > 0 && (
+                                        <>
+                                            <Text dimColor>  •  Avg chunk time: </Text>
+                                            <Text color="cyan">{(avgChunkTimeOverall / 1000).toFixed(2)}s</Text>
+                                        </>
+                                    )}
+                                </Box>
+                            )}
                         </Box>
                     </Box>
 
@@ -269,34 +305,19 @@ export function App() {
                     )}
 
                     {/* Actions */}
-                    <Box
-                        flexDirection="column"
-                        borderStyle="single"
-                        borderColor="gray"
-                        paddingX={2}
-                        paddingY={1}
-                    >
-                        <Text bold color="white">⌨️ Actions</Text>
-                        <Box marginTop={1} flexDirection="column">
-                            <Text>
-                                <Text color="yellow" bold>o</Text>
-                                <Text dimColor> → Open output folder in Finder</Text>
-                            </Text>
-                            <Text>
-                                <Text color="yellow" bold>n</Text>
-                                <Text dimColor> → Process new files</Text>
-                            </Text>
-                            <Text>
-                                <Text color="yellow" bold>q</Text>
-                                <Text dimColor> → Quit</Text>
-                            </Text>
-                        </Box>
+                    <Box marginTop={1}>
+                        <Text dimColor>⌨️  </Text>
+                        <KeyboardHint hints={DONE_HINTS} compact={true} />
                     </Box>
                 </Box>
             )}
 
             <Box marginTop={1}>
-                <Text dimColor>Press q to quit anytime</Text>
+                {screen === 'processing' ? (
+                    <KeyboardHint hints={PROCESSING_HINTS} compact={true} />
+                ) : screen !== 'done' ? (
+                    <Text dimColor>Press q to quit anytime</Text>
+                ) : null}
             </Box>
         </Box>
     );

@@ -2,9 +2,84 @@ import React, { useEffect, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import Gradient from 'ink-gradient';
 import type { FileJob, TTSConfig } from '../App.js';
-import { runTTS, type ProgressInfo } from '../utils/tts-runner.js';
+import { runTTS, type ProgressInfo, type ProcessingPhase } from '../utils/tts-runner.js';
 import { GpuMonitor } from './GpuMonitor.js';
 import * as path from 'path';
+
+// Phase display configuration
+const PHASES: ProcessingPhase[] = ['PARSING', 'INFERENCE', 'CONCATENATING', 'EXPORTING'];
+const PHASE_LABELS: Record<ProcessingPhase, string> = {
+    PARSING: 'Parsing',
+    INFERENCE: 'Inference',
+    CONCATENATING: 'Concatenating',
+    EXPORTING: 'Exporting',
+    DONE: 'Done',
+};
+
+// EMA alpha for smoothing (0.3 = responsive, 0.1 = very smooth)
+const EMA_ALPHA = 0.3;
+
+// Parse Python errors into user-friendly messages
+function parseErrorMessage(error: string): string {
+    const errorLower = error.toLowerCase();
+
+    // GPU/Memory errors
+    if (errorLower.includes('out of memory') || errorLower.includes('mps') && errorLower.includes('memory')) {
+        return 'GPU memory exhausted - try reducing chunk size (--chunk_chars)';
+    }
+    if (errorLower.includes('mps backend') || errorLower.includes('metal')) {
+        return 'GPU acceleration error - try disabling MPS or updating macOS';
+    }
+
+    // File errors
+    if (errorLower.includes('no such file') || errorLower.includes('not found') || errorLower.includes('filenotfounderror')) {
+        return 'Input file not found or inaccessible';
+    }
+    if (errorLower.includes('permission denied')) {
+        return 'Permission denied - check file/folder permissions';
+    }
+    if (errorLower.includes('no readable text') || errorLower.includes('no text chunks')) {
+        return 'EPUB has no readable text content';
+    }
+
+    // Encoding/Format errors
+    if (errorLower.includes('codec') || errorLower.includes('decode') || errorLower.includes('encode')) {
+        return 'Text encoding error - EPUB may contain unsupported characters';
+    }
+    if (errorLower.includes('epub') && errorLower.includes('invalid')) {
+        return 'Invalid EPUB format - file may be corrupted';
+    }
+
+    // FFmpeg errors
+    if (errorLower.includes('ffmpeg') || errorLower.includes('ffprobe')) {
+        return 'FFmpeg not found - please install FFmpeg for MP3 export';
+    }
+
+    // Python version errors
+    if (errorLower.includes('python') && errorLower.includes('version')) {
+        return 'Python version error - Kokoro requires Python 3.10-3.12';
+    }
+
+    // Model/TTS errors
+    if (errorLower.includes('voice') && (errorLower.includes('not found') || errorLower.includes('invalid'))) {
+        return 'Invalid voice - check available voice options';
+    }
+    if (errorLower.includes('model') && errorLower.includes('load')) {
+        return 'Failed to load TTS model - check installation';
+    }
+
+    // Return truncated original error if no pattern matches
+    const lines = error.split('\n');
+    // Try to find the most relevant line (usually the last non-empty one)
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (line && !line.startsWith('Traceback') && !line.startsWith('File ')) {
+            return line.length > 100 ? line.substring(0, 100) + '...' : line;
+        }
+    }
+
+    return error.length > 100 ? error.substring(0, 100) + '...' : error;
+}
 
 interface BatchProgressProps {
     files: FileJob[];
@@ -13,16 +88,53 @@ interface BatchProgressProps {
     onComplete: () => void;
 }
 
-function ProgressBar({ progress, width = 30, showPercentage = true }: { progress: number; width?: number; showPercentage?: boolean }) {
+// Phase Indicator Component
+function PhaseIndicator({ currentPhase }: { currentPhase: ProcessingPhase | undefined }) {
+    return (
+        <Box>
+            {PHASES.map((phase, idx) => {
+                const isActive = currentPhase === phase;
+                const isPast = currentPhase && PHASES.indexOf(currentPhase) > idx;
+                const isDone = currentPhase === 'DONE';
+
+                return (
+                    <React.Fragment key={phase}>
+                        <Text
+                            color={isDone ? 'green' : isActive ? 'green' : isPast ? 'gray' : 'gray'}
+                            bold={isActive}
+                            dimColor={!isActive && !isDone}
+                        >
+                            {PHASE_LABELS[phase]}
+                        </Text>
+                        {idx < PHASES.length - 1 && (
+                            <Text dimColor color="gray"> → </Text>
+                        )}
+                    </React.Fragment>
+                );
+            })}
+        </Box>
+    );
+}
+
+function ProgressBar({ progress, width = 30, showPercentage = true, useGradient = false }: { progress: number; width?: number; showPercentage?: boolean; useGradient?: boolean }) {
     const filled = Math.round((progress / 100) * width);
     const empty = width - filled;
 
     const filledBar = '█'.repeat(filled);
     const emptyBar = '░'.repeat(empty);
 
+    // Gradient color based on progress: blue (0%) -> cyan (50%) -> green (100%)
+    const getGradientColor = (pct: number): string => {
+        if (pct < 50) return 'blue';
+        if (pct < 80) return 'cyan';
+        return 'green';
+    };
+
+    const color = useGradient ? getGradientColor(progress) : 'green';
+
     return (
         <Text>
-            <Text color="green">{filledBar}</Text>
+            <Text color={color}>{filledBar}</Text>
             <Text color="gray">{emptyBar}</Text>
             {showPercentage && (
                 <>
@@ -31,6 +143,22 @@ function ProgressBar({ progress, width = 30, showPercentage = true }: { progress
                 </>
             )}
         </Text>
+    );
+}
+
+// Mini-chunks indicator for small batches (<=50 chunks)
+function MiniChunksIndicator({ current, total }: { current: number; total: number }) {
+    if (total > 50) return null;
+
+    const filled = '●'.repeat(current);
+    const empty = '○'.repeat(total - current);
+
+    return (
+        <Box marginTop={1}>
+            <Text dimColor>Chunks: </Text>
+            <Text color="green">{filled}</Text>
+            <Text color="gray">{empty}</Text>
+        </Box>
     );
 }
 
@@ -91,7 +219,24 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
     const { exit } = useApp();
     const [currentIndex, setCurrentIndex] = useState(0);
     const [startTime] = useState(Date.now());
+    const [elapsedTime, setElapsedTime] = useState(0);
 
+    // Phase tracking
+    const [currentPhase, setCurrentPhase] = useState<ProcessingPhase | undefined>(undefined);
+    const currentPhaseRef = React.useRef<ProcessingPhase | undefined>(undefined);
+
+    // Per-chunk timing with EMA
+    const [avgChunkTime, setAvgChunkTime] = useState<number | undefined>(undefined);
+    const emaChunkTimeRef = React.useRef<number | undefined>(undefined);
+
+    // Total characters for stats
+    const [totalChars, setTotalChars] = useState<number | undefined>(undefined);
+    const totalCharsRef = React.useRef<number | undefined>(undefined);
+
+    // Stall detection
+    const [isStalled, setIsStalled] = useState(false);
+    const lastHeartbeatRef = React.useRef<number>(Date.now());
+    const STALL_THRESHOLD_MS = 15000; // 15 seconds
 
     // Handle quit
     useInput((input, key) => {
@@ -113,6 +258,9 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
     // Dirty flags to prevent unnecessary re-renders
     const hasWorkerUpdates = React.useRef(false);
     const hasFileUpdates = React.useRef(false);
+    const hasPhaseUpdate = React.useRef(false);
+    const hasTimingUpdate = React.useRef(false);
+    const hasCharsUpdate = React.useRef(false);
 
     const [eta, setEta] = useState<string>('Calculating...');
     const etaRef = React.useRef<string>('Calculating...');
@@ -132,12 +280,41 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
                 hasFileUpdates.current = false;
             }
 
+            // Sync phase
+            if (hasPhaseUpdate.current) {
+                setCurrentPhase(currentPhaseRef.current);
+                hasPhaseUpdate.current = false;
+            }
+
+            // Sync timing
+            if (hasTimingUpdate.current) {
+                setAvgChunkTime(emaChunkTimeRef.current);
+                hasTimingUpdate.current = false;
+            }
+
+            // Sync total chars
+            if (hasCharsUpdate.current) {
+                setTotalChars(totalCharsRef.current);
+                hasCharsUpdate.current = false;
+            }
+
             // Sync ETA (always sync simple string, low cost)
             setEta(etaRef.current);
+
+            // Update elapsed time
+            setElapsedTime(Date.now() - startTime);
+
+            // Check for stall (only during INFERENCE phase)
+            if (currentPhaseRef.current === 'INFERENCE') {
+                const timeSinceHeartbeat = Date.now() - lastHeartbeatRef.current;
+                setIsStalled(timeSinceHeartbeat > STALL_THRESHOLD_MS);
+            } else {
+                setIsStalled(false);
+            }
         }, 250);
 
         return () => clearInterval(interval);
-    }, []);
+    }, [startTime]);
 
     useEffect(() => {
         filesRef.current = files;
@@ -168,6 +345,37 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
                         files[i].outputPath,
                         config,
                         (progressInfo: ProgressInfo) => {
+                            // Update phase
+                            if (progressInfo.phase && progressInfo.phase !== currentPhaseRef.current) {
+                                currentPhaseRef.current = progressInfo.phase;
+                                hasPhaseUpdate.current = true;
+                                // Reset heartbeat timer on phase change
+                                lastHeartbeatRef.current = Date.now();
+                            }
+
+                            // Update heartbeat timestamp
+                            if (progressInfo.heartbeatTs) {
+                                lastHeartbeatRef.current = Date.now();
+                            }
+
+                            // Update per-chunk timing with EMA
+                            if (progressInfo.chunkTimingMs !== undefined) {
+                                if (emaChunkTimeRef.current === undefined) {
+                                    emaChunkTimeRef.current = progressInfo.chunkTimingMs;
+                                } else {
+                                    emaChunkTimeRef.current = EMA_ALPHA * progressInfo.chunkTimingMs + (1 - EMA_ALPHA) * emaChunkTimeRef.current;
+                                }
+                                hasTimingUpdate.current = true;
+                                // Also update heartbeat on timing
+                                lastHeartbeatRef.current = Date.now();
+                            }
+
+                            // Update total characters
+                            if (progressInfo.totalChars !== undefined && progressInfo.totalChars !== totalCharsRef.current) {
+                                totalCharsRef.current = progressInfo.totalChars;
+                                hasCharsUpdate.current = true;
+                            }
+
                             // Update Worker Status Ref (No re-render)
                             if (progressInfo.workerStatus) {
                                 const { id, status, details } = progressInfo.workerStatus;
@@ -175,6 +383,8 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
                                 next.set(id, { status, details });
                                 workerStatesRef.current = next;
                                 hasWorkerUpdates.current = true;
+                                // Also update heartbeat on worker activity
+                                lastHeartbeatRef.current = Date.now();
                             }
 
                             // Update Progress Ref (No re-render)
@@ -190,12 +400,21 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
                                 hasFileUpdates.current = true;
                             }
 
-                            // Update ETA Ref (No re-render)
-                            const elapsed = Date.now() - startTime;
+                            // Update ETA with EMA-based calculation
                             if (progressInfo.totalChunks > 0 && progressInfo.currentChunk > 0) {
-                                const avgTimePerChunk = elapsed / progressInfo.currentChunk;
-                                const remainingChunks = progressInfo.totalChunks - progressInfo.currentChunk;
-                                const remainingTime = avgTimePerChunk * remainingChunks;
+                                let remainingTime: number;
+
+                                if (emaChunkTimeRef.current !== undefined) {
+                                    // Use EMA for smoother estimates
+                                    const remainingChunks = progressInfo.totalChunks - progressInfo.currentChunk;
+                                    remainingTime = emaChunkTimeRef.current * remainingChunks;
+                                } else {
+                                    // Fallback to simple average
+                                    const elapsed = Date.now() - startTime;
+                                    const avgTimePerChunk = elapsed / progressInfo.currentChunk;
+                                    const remainingChunks = progressInfo.totalChunks - progressInfo.currentChunk;
+                                    remainingTime = avgTimePerChunk * remainingChunks;
+                                }
 
                                 if (remainingTime > 60000) {
                                     etaRef.current = `${Math.round(remainingTime / 60000)} min`;
@@ -206,27 +425,46 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
                         }
                     );
 
-                    // Mark as done
-                    setFiles(prev => {
-                        const next = prev.map((f, idx) =>
-                            idx === i ? { ...f, status: 'done' as const, progress: 100 } : f
-                        );
-                        filesRef.current = next;
-                        return next;
-                    });
-                } catch (error) {
-                    // Mark as error
+                    // Mark as done with stats
                     setFiles(prev => {
                         const next = prev.map((f, idx) =>
                             idx === i ? {
                                 ...f,
-                                status: 'error' as const,
-                                error: error instanceof Error ? error.message : 'Unknown error'
+                                status: 'done' as const,
+                                progress: 100,
+                                totalChars: totalCharsRef.current,
+                                avgChunkTimeMs: emaChunkTimeRef.current,
                             } : f
                         );
                         filesRef.current = next;
                         return next;
                     });
+
+                    // Reset stats for next file
+                    emaChunkTimeRef.current = undefined;
+                    totalCharsRef.current = undefined;
+                    currentPhaseRef.current = undefined;
+                } catch (error) {
+                    // Mark as error with user-friendly message
+                    const rawError = error instanceof Error ? error.message : 'Unknown error';
+                    const friendlyError = parseErrorMessage(rawError);
+
+                    setFiles(prev => {
+                        const next = prev.map((f, idx) =>
+                            idx === i ? {
+                                ...f,
+                                status: 'error' as const,
+                                error: friendlyError
+                            } : f
+                        );
+                        filesRef.current = next;
+                        return next;
+                    });
+
+                    // Reset stats for next file
+                    emaChunkTimeRef.current = undefined;
+                    totalCharsRef.current = undefined;
+                    currentPhaseRef.current = undefined;
                 }
             }
 
@@ -267,6 +505,19 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
         );
     };
 
+    // Format elapsed time
+    const formatElapsed = (ms: number): string => {
+        const seconds = Math.floor(ms / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+        if (hours > 0) {
+            return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+        } else if (minutes > 0) {
+            return `${minutes}m ${seconds % 60}s`;
+        }
+        return `${seconds}s`;
+    };
+
     return (
         <Box flexDirection="column" paddingX={2}>
             {/* Section Header */}
@@ -275,6 +526,22 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
                     <Text bold>🎧 Processing Audiobooks</Text>
                 </Gradient>
             </Box>
+
+            {/* Stall Warning */}
+            {isStalled && (
+                <Box marginBottom={1} paddingX={2} paddingY={1} borderStyle="round" borderColor="yellow">
+                    <Text color="yellow" bold>⚠️ Warning: </Text>
+                    <Text color="yellow">No response for 15+ seconds. Processing may be stalled.</Text>
+                </Box>
+            )}
+
+            {/* Phase Indicator */}
+            {currentPhase && (
+                <Box marginBottom={1}>
+                    <Text dimColor>Phase: </Text>
+                    <PhaseIndicator currentPhase={currentPhase} />
+                </Box>
+            )}
 
             {/* Currently Processing Card */}
             {currentFile && currentFile.status === 'processing' && (
@@ -300,9 +567,26 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
                             <Text dimColor> ({Math.round((currentFile.currentChunk / currentFile.totalChunks) * 100)}%)</Text>
                         </Box>
                     )}
+                    {/* Per-chunk timing stats */}
+                    {avgChunkTime !== undefined && (
+                        <Box marginTop={1}>
+                            <Text dimColor>Avg chunk time: </Text>
+                            <Text color="cyan" bold>{(avgChunkTime / 1000).toFixed(2)}s</Text>
+                            {totalChars !== undefined && (
+                                <>
+                                    <Text dimColor>  •  Total chars: </Text>
+                                    <Text color="cyan">{totalChars.toLocaleString()}</Text>
+                                </>
+                            )}
+                        </Box>
+                    )}
                     <Box marginTop={1}>
-                        <ProgressBar progress={currentFile.progress} width={35} />
+                        <ProgressBar progress={currentFile.progress} width={35} useGradient={true} />
                     </Box>
+                    {/* Mini-chunks indicator for small batches */}
+                    {currentFile.currentChunk !== undefined && currentFile.totalChunks !== undefined && (
+                        <MiniChunksIndicator current={currentFile.currentChunk} total={currentFile.totalChunks} />
+                    )}
                 </Box>
             )}
 
@@ -331,12 +615,14 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
                         )}
                     </Box>
                     <Box>
-                        <Text dimColor>⏱️  ETA: </Text>
+                        <Text dimColor>⏱️  Elapsed: </Text>
+                        <Text color="cyan">{formatElapsed(elapsedTime)}</Text>
+                        <Text dimColor>  •  ETA: </Text>
                         <Text color="yellow" bold>{eta}</Text>
                     </Box>
                 </Box>
                 <Box marginTop={1}>
-                    <ProgressBar progress={overallProgress} width={40} />
+                    <ProgressBar progress={overallProgress} width={40} useGradient={true} />
                 </Box>
             </Box>
 

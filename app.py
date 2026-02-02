@@ -172,8 +172,14 @@ def main() -> None:
     if not os.path.exists(args.input):
         raise FileNotFoundError(f"Input EPUB not found: {args.input}")
 
+    # Phase: Parsing
+    print("PHASE:PARSING", flush=True)
     chapters = extract_epub_text(args.input)
     chunks = split_text_to_chunks(chapters, args.chunk_chars)
+
+    # Emit metadata about extracted text
+    total_chars = sum(len(chunk.text) for chunk in chunks)
+    print(f"METADATA:total_chars:{total_chars}", flush=True)
 
     if not chunks:
         raise ValueError("No text chunks produced from EPUB.")
@@ -227,8 +233,13 @@ def main() -> None:
 
     print(f"Processing {total_chunks} chunks (sequential GPU + background encoding)", flush=True)
 
+    # Phase: Inference
+    print("PHASE:INFERENCE", flush=True)
+    last_heartbeat = time.time()
+
     def run_inference():
         """Main thread: sequential GPU inference."""
+        nonlocal last_heartbeat
         for idx, chunk in enumerate(chunks):
             start = time.perf_counter()
 
@@ -248,6 +259,15 @@ def main() -> None:
 
             elapsed = time.perf_counter() - start
             times.append(elapsed)
+
+            # Emit per-chunk timing
+            print(f"TIMING:{idx}:{int(elapsed*1000)}", flush=True)
+
+            # Emit heartbeat every 5 seconds
+            now = time.time()
+            if now - last_heartbeat >= 5:
+                print(f"HEARTBEAT:{int(now*1000)}", flush=True)
+                last_heartbeat = now
 
             # Update progress
             if progress and task_id is not None:
@@ -269,6 +289,8 @@ def main() -> None:
     if encoding_error[0]:
         raise encoding_error[0]
 
+    # Phase: Concatenating
+    print("PHASE:CONCATENATING", flush=True)
     # O(n) concatenation: collect all int16 arrays, concatenate once
     print("Concatenating audio segments...", flush=True)
     all_arrays: List[np.ndarray] = []
@@ -291,6 +313,8 @@ def main() -> None:
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
 
+    # Phase: Exporting
+    print("PHASE:EXPORTING", flush=True)
     combined.export(args.output, format="mp3", bitrate="192k")
 
     avg_time = sum(times) / max(len(times), 1)

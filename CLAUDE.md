@@ -8,7 +8,7 @@ AI Audiobook Fast converts EPUB files into MP3 audiobooks using the Kokoro TTS e
 - **Frontend CLI** (`cli/`): Node.js/TypeScript/React terminal UI using Ink
 - **Backend** (`app.py`): Python script handling EPUB parsing and TTS generation
 
-The CLI spawns the Python process and communicates via stdout (IPC protocol with structured messages like `WORKER:0:INFER:Chunk 5/50`).
+The CLI spawns the Python process and communicates via stdout (IPC protocol with structured messages).
 
 ## Common Commands
 
@@ -34,7 +34,7 @@ npm start                # Run compiled version
 
 ### Direct Python Usage
 ```bash
-python app.py --input book.epub --output book.mp3 --voice af_heart --speed 1.0 --workers 4
+python app.py --input book.epub --output book.mp3 --voice af_heart --speed 1.0
 ```
 
 ## Architecture
@@ -42,30 +42,45 @@ python app.py --input book.epub --output book.mp3 --voice af_heart --speed 1.0 -
 ### Frontend (cli/src/)
 - `index.tsx` - Entry point
 - `App.tsx` - Main component with state machine: `welcome` → `files` → `config` → `processing` → `done`
-- `components/` - UI components (Header, FileSelector, ConfigPanel, BatchProgress, GpuMonitor)
-- `utils/tts-runner.ts` - Spawns Python process and parses stdout progress messages
+- `components/` - UI components (Header, FileSelector, ConfigPanel, BatchProgress, GpuMonitor, KeyboardHint)
+- `utils/tts-runner.ts` - Spawns Python process, sets MPS env vars, parses stdout progress
 
 ### Backend (app.py)
-Uses producer-consumer pattern with threading:
-1. Main thread extracts EPUB text, splits into ~1200-char chunks, pushes to queue
-2. Worker threads pull chunks, run Kokoro inference (GPU), encode audio (CPU)
-3. Results stored in thread-safe dict keyed by chunk index
-4. Main thread reassembles segments in order, exports to MP3
+Uses sequential GPU inference + background encoding (optimized for Apple Silicon MPS):
+1. Main thread extracts EPUB text, splits into ~1200-char chunks
+2. Main thread runs Kokoro inference sequentially (GPU), queues audio for encoding
+3. Background thread converts audio tensors to int16 numpy arrays
+4. Results stored as numpy arrays, concatenated with `np.concatenate()` (O(n) vs O(n²))
+5. Final AudioSegment exported to MP3
 
-Key Python args: `--input`, `--output`, `--voice`, `--speed`, `--workers`, `--chunk_chars`
+**Why not multi-threaded GPU?** MPS serializes GPU operations, so multiple workers queue up waiting. Testing showed 0.88x slower with threading.
+
+Key Python args: `--input`, `--output`, `--voice`, `--speed`, `--chunk_chars`
 
 ### IPC Protocol
-Python outputs to stdout:
-- `WORKER:N:INFER:Chunk X/Y` - Worker status
-- `PROGRESS:N/M chunks` - Overall progress
+Python outputs to stdout, parsed by `tts-runner.ts`:
+```
+PHASE:PARSING              # Before text extraction
+PHASE:INFERENCE            # Before inference loop
+PHASE:CONCATENATING        # Before np.concatenate()
+PHASE:EXPORTING            # Before MP3 export
+METADATA:total_chars:N     # After text extraction (character count)
+WORKER:0:INFER:Chunk X/Y   # Per-chunk inference status
+TIMING:chunk_idx:ms        # Per-chunk timing in milliseconds
+HEARTBEAT:timestamp        # Every 5 seconds during inference
+PROGRESS:N/M chunks        # Overall progress
+```
 
-CLI parses these in `tts-runner.ts` and updates UI.
+### MPS Environment Variables
+When MPS is enabled, `tts-runner.ts` sets:
+- `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0` - Aggressive memory cleanup
+- `OMP_NUM_THREADS=4` / `OPENBLAS_NUM_THREADS=2` - Reduce GIL contention
 
 ## Key Dependencies
 
-- **Python**: kokoro (TTS), ebooklib (EPUB), pydub (audio), torch
+- **Python**: kokoro (TTS), ebooklib (EPUB), pydub (audio), torch, numpy
 - **Node.js**: react, ink (terminal UI), commander (CLI args), glob (file patterns)
-- **System**: FFmpeg (required for MP3 export)
+- **System**: FFmpeg (required for MP3 export), Python 3.10-3.12 (Kokoro requirement)
 
 ## Voice Options
 

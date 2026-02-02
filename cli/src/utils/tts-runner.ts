@@ -8,11 +8,17 @@ export interface WorkerStatus {
     details: string;
 }
 
+export type ProcessingPhase = 'PARSING' | 'INFERENCE' | 'CONCATENATING' | 'EXPORTING' | 'DONE';
+
 export interface ProgressInfo {
     progress: number;
     currentChunk: number;
     totalChunks: number;
     workerStatus?: WorkerStatus;
+    phase?: ProcessingPhase;
+    chunkTimingMs?: number;  // Per-chunk timing in ms
+    heartbeatTs?: number;    // Heartbeat timestamp
+    totalChars?: number;     // Total characters in EPUB
 }
 
 export function runTTS(
@@ -61,6 +67,8 @@ export function runTTS(
         let lastProgress = 0;
         let lastCurrentChunk = 0;
         let lastTotal = 0;
+        let lastPhase: ProcessingPhase | undefined;
+        let lastTotalChars: number | undefined;
         let stderr = '';
         const MAX_STDERR = 10000;
 
@@ -70,6 +78,65 @@ export function runTTS(
 
             const lines = output.split('\n');
             for (const line of lines) {
+                // Parse phase transitions
+                // PHASE:PARSING, PHASE:INFERENCE, PHASE:CONCATENATING, PHASE:EXPORTING
+                if (line.startsWith('PHASE:')) {
+                    const phase = line.slice(6) as ProcessingPhase;
+                    lastPhase = phase;
+                    onProgress({
+                        progress: lastProgress,
+                        currentChunk: lastCurrentChunk,
+                        totalChunks: lastTotal,
+                        phase,
+                        totalChars: lastTotalChars,
+                    });
+                }
+
+                // Parse metadata
+                // METADATA:total_chars:12345
+                if (line.startsWith('METADATA:total_chars:')) {
+                    const totalChars = parseInt(line.slice(21), 10);
+                    lastTotalChars = totalChars;
+                    onProgress({
+                        progress: lastProgress,
+                        currentChunk: lastCurrentChunk,
+                        totalChunks: lastTotal,
+                        phase: lastPhase,
+                        totalChars,
+                    });
+                }
+
+                // Parse per-chunk timing
+                // TIMING:5:2340 (chunk_idx:ms)
+                if (line.startsWith('TIMING:')) {
+                    const parts = line.slice(7).split(':');
+                    if (parts.length >= 2) {
+                        const chunkTimingMs = parseInt(parts[1], 10);
+                        onProgress({
+                            progress: lastProgress,
+                            currentChunk: lastCurrentChunk,
+                            totalChunks: lastTotal,
+                            phase: lastPhase,
+                            chunkTimingMs,
+                            totalChars: lastTotalChars,
+                        });
+                    }
+                }
+
+                // Parse heartbeat
+                // HEARTBEAT:1234567890123
+                if (line.startsWith('HEARTBEAT:')) {
+                    const heartbeatTs = parseInt(line.slice(10), 10);
+                    onProgress({
+                        progress: lastProgress,
+                        currentChunk: lastCurrentChunk,
+                        totalChunks: lastTotal,
+                        phase: lastPhase,
+                        heartbeatTs,
+                        totalChars: lastTotalChars,
+                    });
+                }
+
                 // Parse worker status
                 // WORKER:0:INFER:Chunk 5/50
                 if (line.startsWith('WORKER:')) {
@@ -83,7 +150,9 @@ export function runTTS(
                             progress: lastProgress,
                             currentChunk: lastCurrentChunk,
                             totalChunks: lastTotal,
-                            workerStatus: { id, status, details }
+                            phase: lastPhase,
+                            workerStatus: { id, status, details },
+                            totalChars: lastTotalChars,
                         });
                     }
                 }
@@ -99,7 +168,13 @@ export function runTTS(
                     lastProgress = progress;
                     lastCurrentChunk = current;
                     lastTotal = total;
-                    onProgress({ progress, currentChunk: current, totalChunks: total });
+                    onProgress({
+                        progress,
+                        currentChunk: current,
+                        totalChunks: total,
+                        phase: lastPhase,
+                        totalChars: lastTotalChars,
+                    });
                 }
             }
         });
