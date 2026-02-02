@@ -183,7 +183,7 @@ python app.py --input /path/to/book.epub --output /path/to/book.mp3
 | `--voice` | `af_heart` | Voice selection (see below) |
 | `--lang_code` | `a` | Language code |
 | `--speed` | `1.0` | Speech speed (0.75–1.5) |
-| `--chunk_chars` | `1200` | Characters per audio chunk |
+| `--chunk_chars` | `900` (MLX) / `600` (PyTorch) | Characters per audio chunk |
 | `--workers` | `2` | Parallel workers for audio encoding (increase for faster processing) |
 
 </details>
@@ -309,7 +309,7 @@ python app.py --input book.epub --output book.mp3
 ```
 
 - **Workers**: On Apple Silicon, 1-2 workers is optimal. The GPU serializes operations via MPS, so more workers add overhead without speedup
-- **Chunk size**: Increase `--chunk_chars` (2000-3000) for fewer chunks and less overhead
+- **Chunk size**: Defaults are optimized per backend (900 for MLX, 600 for PyTorch). Override with `--chunk_chars` if needed
 - **Memory**: The optimized pipeline uses O(n) audio concatenation, keeping memory usage flat even for large books
 
 ---

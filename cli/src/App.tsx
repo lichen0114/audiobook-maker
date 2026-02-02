@@ -41,11 +41,19 @@ export interface FileJob {
     startTime?: number; // processing start timestamp
 }
 
+// Optimal chunk sizes per backend based on benchmarks
+// MLX: 900 chars = 180 chars/s (+11% vs 1200)
+// PyTorch: 600 chars = 98 chars/s (+3% vs 1200)
+const BACKEND_CHUNK_CHARS: Record<'pytorch' | 'mlx', number> = {
+    mlx: 900,
+    pytorch: 600,
+};
+
 const defaultConfig: TTSConfig = {
     voice: 'af_heart',
     speed: 1.0,
     langCode: 'a',
-    chunkChars: 1200,
+    chunkChars: 600, // Default for PyTorch; updated when backend changes
     useMPS: true, // Enable Apple Silicon GPU acceleration by default
     outputDir: null,
     workers: 2, // Use 2 parallel workers by default (optimal for Apple Silicon MPS)

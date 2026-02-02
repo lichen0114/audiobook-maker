@@ -28,6 +28,14 @@ from backends import create_backend, TTSBackend
 
 DEFAULT_SAMPLE_RATE = 24000
 
+# Optimal chunk sizes per backend based on benchmarks
+# MLX: 900 chars = 180 chars/s (+11% vs 1200)
+# PyTorch: 600 chars = 98 chars/s (+3% vs 1200)
+DEFAULT_CHUNK_CHARS = {
+    'mlx': 900,
+    'pytorch': 600,
+}
+
 
 @dataclass
 class TextChunk:
@@ -174,8 +182,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--chunk_chars",
         type=int,
-        default=1200,
-        help="Approximate max characters per chunk",
+        default=None,
+        help="Approximate max characters per chunk (default: 900 for MLX, 600 for PyTorch)",
     )
     parser.add_argument(
         "--split_pattern",
@@ -213,10 +221,13 @@ def main() -> None:
     if not os.path.exists(args.input):
         raise FileNotFoundError(f"Input EPUB not found: {args.input}")
 
+    # Determine chunk size: use user-provided value or backend-optimal default
+    chunk_chars = args.chunk_chars if args.chunk_chars is not None else DEFAULT_CHUNK_CHARS.get(args.backend, 600)
+
     # Phase: Parsing
     print("PHASE:PARSING", flush=True)
     chapters = extract_epub_text(args.input)
-    chunks = split_text_to_chunks(chapters, args.chunk_chars)
+    chunks = split_text_to_chunks(chapters, chunk_chars)
 
     # Emit metadata about extracted text
     total_chars = sum(len(chunk.text) for chunk in chunks)

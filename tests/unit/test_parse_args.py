@@ -30,7 +30,9 @@ class TestParseArgs:
             assert args.voice == "af_heart"
             assert args.lang_code == "a"
             assert args.speed == 1.0
-            assert args.chunk_chars == 1200
+            # chunk_chars defaults to None, resolved at runtime based on backend
+            # (900 for MLX, 600 for PyTorch)
+            assert args.chunk_chars is None
             assert args.split_pattern == r"\n+"
             assert args.workers == 2
             assert args.no_rich is False

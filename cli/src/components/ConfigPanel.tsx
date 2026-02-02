@@ -5,6 +5,14 @@ import TextInput from 'ink-text-input';
 import * as path from 'path';
 import type { TTSConfig, FileJob } from '../App.js';
 
+// Optimal chunk sizes per backend based on benchmarks
+// MLX: 900 chars = 180 chars/s (+11% vs 1200)
+// PyTorch: 600 chars = 98 chars/s (+3% vs 1200)
+const BACKEND_CHUNK_CHARS: Record<'pytorch' | 'mlx', number> = {
+    mlx: 900,
+    pytorch: 600,
+};
+
 interface ConfigPanelProps {
     files: FileJob[];
     config: TTSConfig;
@@ -47,6 +55,7 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
     const [selectedVoice, setSelectedVoice] = useState(config.voice);
     const [selectedSpeed, setSelectedSpeed] = useState(config.speed);
     const [selectedBackend, setSelectedBackend] = useState<'pytorch' | 'mlx'>(config.backend || 'pytorch');
+    const [selectedChunkChars, setSelectedChunkChars] = useState(config.chunkChars || BACKEND_CHUNK_CHARS[config.backend || 'pytorch']);
     const [selectedWorkers, setSelectedWorkers] = useState(config.workers || 2);
     const [useMPS, setUseMPS] = useState(config.useMPS);
     const [outputDir, setOutputDir] = useState<string | null>(config.outputDir);
@@ -71,6 +80,8 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
     const handleBackendSelect = (item: { value: string }) => {
         const backend = item.value as 'pytorch' | 'mlx';
         setSelectedBackend(backend);
+        // Update chunk size to optimal value for selected backend
+        setSelectedChunkChars(BACKEND_CHUNK_CHARS[backend]);
         // MLX natively uses Apple Silicon, so skip GPU step
         if (backend === 'mlx') {
             setUseMPS(true); // MLX always uses Apple Silicon
@@ -119,6 +130,7 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                 voice: selectedVoice,
                 speed: selectedSpeed,
                 backend: selectedBackend,
+                chunkChars: selectedChunkChars,
                 workers: selectedWorkers,
                 useMPS,
                 outputDir,

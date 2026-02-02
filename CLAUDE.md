@@ -69,7 +69,7 @@ The `--backend` flag selects which backend to use (`pytorch` or `mlx`). MLX requ
 
 ### Backend (`app.py`)
 Sequential inference + background encoding pipeline:
-1. Extract EPUB text, split into ~1200-char chunks (configurable via `--chunk_chars`)
+1. Extract EPUB text, split into chunks (default: 900 chars for MLX, 600 for PyTorch; configurable via `--chunk_chars`)
 2. Backend generates audio sequentially, queues for encoding
 3. Background thread(s) convert audio to int16 numpy arrays (`--workers` controls parallelism)
 4. Results concatenated with `np.concatenate()` (O(n) vs O(n²))
