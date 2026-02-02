@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import Spinner from 'ink-spinner';
+import Gradient from 'ink-gradient';
 import type { FileJob, TTSConfig } from '../App.js';
 import { runTTS } from '../utils/tts-runner.js';
 import * as path from 'path';
@@ -12,7 +13,7 @@ interface BatchProgressProps {
     onComplete: () => void;
 }
 
-function ProgressBar({ progress, width = 30 }: { progress: number; width?: number }) {
+function ProgressBar({ progress, width = 30, showPercentage = true }: { progress: number; width?: number; showPercentage?: boolean }) {
     const filled = Math.round((progress / 100) * width);
     const empty = width - filled;
 
@@ -23,26 +24,31 @@ function ProgressBar({ progress, width = 30 }: { progress: number; width?: numbe
         <Text>
             <Text color="green">{filledBar}</Text>
             <Text color="gray">{emptyBar}</Text>
-            <Text color="cyan"> {progress}%</Text>
+            {showPercentage && (
+                <>
+                    <Text> </Text>
+                    <Text bold color="white">{String(progress).padStart(3, ' ')}%</Text>
+                </>
+            )}
         </Text>
     );
 }
 
-function FileStatus({ file }: { file: FileJob }) {
+function FileStatus({ file, isActive }: { file: FileJob; isActive?: boolean }) {
     const getStatusIcon = () => {
         switch (file.status) {
             case 'pending':
-                return <Text color="gray">⏳</Text>;
+                return <Text color="gray" dimColor>⏳</Text>;
             case 'processing':
-                return <Text color="cyan"><Spinner type="dots" /></Text>;
+                return <Text color="cyan"><Spinner type="dots12" /></Text>;
             case 'done':
-                return <Text color="green">✅</Text>;
+                return <Text color="green">✔</Text>;
             case 'error':
-                return <Text color="red">❌</Text>;
+                return <Text color="red">✘</Text>;
         }
     };
 
-    const getStatusColor = () => {
+    const getStatusColor = (): string => {
         switch (file.status) {
             case 'pending': return 'gray';
             case 'processing': return 'cyan';
@@ -56,11 +62,16 @@ function FileStatus({ file }: { file: FileJob }) {
             <Box>
                 {getStatusIcon()}
                 <Text> </Text>
-                <Text color={getStatusColor()}>{path.basename(file.inputPath)}</Text>
+                <Text color={getStatusColor()} bold={file.status === 'processing'}>
+                    {path.basename(file.inputPath)}
+                </Text>
+                {file.status === 'done' && (
+                    <Text dimColor> → saved</Text>
+                )}
             </Box>
             {file.status === 'processing' && (
-                <Box marginLeft={3}>
-                    <ProgressBar progress={file.progress} />
+                <Box marginLeft={3} marginTop={0}>
+                    <ProgressBar progress={file.progress} width={25} />
                 </Box>
             )}
             {file.error && (
@@ -145,13 +156,38 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
         processFiles();
     }, []);
 
+    const currentFile = files[currentIndex];
+
     return (
         <Box flexDirection="column" paddingX={2}>
+            {/* Section Header */}
             <Box marginBottom={1}>
-                <Text color="cyan">🎧 Processing Audiobooks</Text>
+                <Gradient name="passion">
+                    <Text bold>🎧 Processing Audiobooks</Text>
+                </Gradient>
             </Box>
 
-            {/* Overall Progress */}
+            {/* Currently Processing Card */}
+            {currentFile && currentFile.status === 'processing' && (
+                <Box
+                    flexDirection="column"
+                    borderStyle="round"
+                    borderColor="magenta"
+                    paddingX={2}
+                    paddingY={1}
+                    marginBottom={1}
+                >
+                    <Box>
+                        <Text dimColor>Currently Processing: </Text>
+                        <Text bold color="white">{path.basename(currentFile.inputPath)}</Text>
+                    </Box>
+                    <Box marginTop={1}>
+                        <ProgressBar progress={currentFile.progress} width={35} />
+                    </Box>
+                </Box>
+            )}
+
+            {/* Overall Progress Card */}
             <Box
                 flexDirection="column"
                 borderStyle="round"
@@ -160,28 +196,43 @@ export function BatchProgress({ files, setFiles, config, onComplete }: BatchProg
                 paddingY={1}
                 marginBottom={1}
             >
-                <Box>
-                    <Text bold>Overall Progress: </Text>
-                    <Text color="green">{completedCount}</Text>
-                    <Text>/{files.length} files</Text>
-                    {errorCount > 0 && (
-                        <Text color="red"> ({errorCount} errors)</Text>
-                    )}
+                <Box justifyContent="space-between">
+                    <Box>
+                        <Text dimColor>Overall Progress: </Text>
+                        <Text bold color="green">{completedCount}</Text>
+                        <Text dimColor>/</Text>
+                        <Text>{files.length}</Text>
+                        <Text dimColor> files</Text>
+                        {errorCount > 0 && (
+                            <Text color="red"> ({errorCount} errors)</Text>
+                        )}
+                    </Box>
+                    <Box>
+                        <Text dimColor>⏱️  ETA: </Text>
+                        <Text color="yellow" bold>{eta}</Text>
+                    </Box>
                 </Box>
                 <Box marginTop={1}>
                     <ProgressBar progress={overallProgress} width={40} />
-                </Box>
-                <Box marginTop={1}>
-                    <Text color="yellow">⏱️  ETA: {eta}</Text>
                 </Box>
             </Box>
 
             {/* File List */}
             <Box flexDirection="column">
-                <Text bold color="white">Files:</Text>
-                <Box flexDirection="column" marginTop={1} paddingLeft={1}>
-                    {files.map((file) => (
-                        <FileStatus key={file.id} file={file} />
+                <Box marginBottom={1}>
+                    <Text dimColor>📚 </Text>
+                    <Text bold color="white">Files</Text>
+                </Box>
+                <Box
+                    flexDirection="column"
+                    paddingLeft={1}
+                    borderStyle="single"
+                    borderColor="gray"
+                    paddingX={2}
+                    paddingY={1}
+                >
+                    {files.map((file, idx) => (
+                        <FileStatus key={file.id} file={file} isActive={idx === currentIndex} />
                     ))}
                 </Box>
             </Box>

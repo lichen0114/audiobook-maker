@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
+import Gradient from 'ink-gradient';
 import { glob } from 'glob';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -86,23 +87,43 @@ export function FileSelector({ onFilesSelected }: FileSelectorProps) {
     if (mode === 'confirm') {
         return (
             <Box flexDirection="column" paddingX={2}>
+                {/* Found Files Header */}
                 <Box marginBottom={1}>
-                    <Text color="green">📚 Found {files.length} EPUB file{files.length !== 1 ? 's' : ''}:</Text>
+                    <Text color="green">✔ </Text>
+                    <Text bold>Found </Text>
+                    <Text color="cyan" bold>{files.length}</Text>
+                    <Text bold> EPUB file{files.length !== 1 ? 's' : ''}</Text>
                 </Box>
 
-                <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
+                {/* File List Card */}
+                <Box
+                    flexDirection="column"
+                    borderStyle="round"
+                    borderColor="cyan"
+                    paddingX={2}
+                    paddingY={1}
+                    marginBottom={1}
+                >
                     {files.slice(0, 10).map((file, index) => (
-                        <Text key={index} color="cyan">
-                            {index + 1}. {path.basename(file)}
-                        </Text>
+                        <Box key={index}>
+                            <Text dimColor>{String(index + 1).padStart(2, ' ')}. </Text>
+                            <Text color="white">{path.basename(file)}</Text>
+                        </Box>
                     ))}
                     {files.length > 10 && (
-                        <Text dimColor>... and {files.length - 10} more</Text>
+                        <Box marginTop={1}>
+                            <Text dimColor>   ... and </Text>
+                            <Text color="yellow">{files.length - 10}</Text>
+                            <Text dimColor> more</Text>
+                        </Box>
                     )}
                 </Box>
 
+                {/* Confirm Prompt */}
                 <Box borderStyle="round" borderColor="yellow" paddingX={2} paddingY={1}>
-                    <Text color="yellow">Continue with these files? (y/n)</Text>
+                    <Gradient name="morning">
+                        <Text bold>Continue with these files? (y/n)</Text>
+                    </Gradient>
                 </Box>
             </Box>
         );
@@ -110,20 +131,45 @@ export function FileSelector({ onFilesSelected }: FileSelectorProps) {
 
     return (
         <Box flexDirection="column" paddingX={2}>
+            {/* Section Header */}
             <Box marginBottom={1}>
-                <Text color="cyan">📂 Select EPUB files</Text>
+                <Gradient name="fruit">
+                    <Text bold>📂 Select EPUB files</Text>
+                </Gradient>
             </Box>
 
-            <Box marginBottom={1} flexDirection="column">
+            {/* Help Text */}
+            <Box
+                marginBottom={1}
+                flexDirection="column"
+                borderStyle="single"
+                borderColor="gray"
+                paddingX={2}
+                paddingY={1}
+            >
                 <Text dimColor>Enter a file path, directory, or glob pattern:</Text>
-                <Text dimColor>Examples:</Text>
-                <Text dimColor>  • ./book.epub</Text>
-                <Text dimColor>  • ./*.epub (all EPUBs in current dir)</Text>
-                <Text dimColor>  • ./books/ (all EPUBs in folder)</Text>
+                <Box marginTop={1} flexDirection="column" paddingLeft={1}>
+                    <Box>
+                        <Text color="cyan">• </Text>
+                        <Text color="white">./book.epub</Text>
+                        <Text dimColor>          (single file)</Text>
+                    </Box>
+                    <Box>
+                        <Text color="cyan">• </Text>
+                        <Text color="white">./*.epub</Text>
+                        <Text dimColor>            (all in current dir)</Text>
+                    </Box>
+                    <Box>
+                        <Text color="cyan">• </Text>
+                        <Text color="white">./books/</Text>
+                        <Text dimColor>            (all in folder)</Text>
+                    </Box>
+                </Box>
             </Box>
 
+            {/* Input */}
             <Box marginBottom={1}>
-                <Text color="green">{'> '}</Text>
+                <Text color="green" bold>{'❯ '}</Text>
                 <TextInput
                     value={input}
                     onChange={setInput}
@@ -132,9 +178,10 @@ export function FileSelector({ onFilesSelected }: FileSelectorProps) {
                 />
             </Box>
 
+            {/* Error Message */}
             {error && (
                 <Box>
-                    <Text color="red">❌ {error}</Text>
+                    <Text color="red">✘ {error}</Text>
                 </Box>
             )}
         </Box>

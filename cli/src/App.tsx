@@ -98,13 +98,27 @@ export function App() {
 
             {screen === 'done' && (
                 <Box flexDirection="column" marginTop={1}>
-                    <Text color="green">✨ All done! Your audiobooks are ready.</Text>
-                    <Box marginTop={1}>
-                        {files.map(file => (
-                            <Box key={file.id} marginBottom={1}>
-                                <Text color="cyan">📁 {file.outputPath}</Text>
-                            </Box>
-                        ))}
+                    <Box marginBottom={1}>
+                        <Text color="green" bold>✨ All done!</Text>
+                        <Text> Your audiobooks are ready.</Text>
+                    </Box>
+                    <Box
+                        flexDirection="column"
+                        borderStyle="round"
+                        borderColor="green"
+                        paddingX={2}
+                        paddingY={1}
+                        marginBottom={1}
+                    >
+                        <Text dimColor bold>📁 Output Files:</Text>
+                        <Box marginTop={1} flexDirection="column">
+                            {files.map(file => (
+                                <Box key={file.id}>
+                                    <Text color="green">✔ </Text>
+                                    <Text color="cyan">{file.outputPath}</Text>
+                                </Box>
+                            ))}
+                        </Box>
                     </Box>
                     <Text dimColor>Press q to exit</Text>
                 </Box>
