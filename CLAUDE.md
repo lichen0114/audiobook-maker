@@ -12,10 +12,15 @@ The CLI spawns the Python process and communicates via stdout (IPC protocol with
 
 ## Common Commands
 
-### Setup
+### Setup (Recommended: One-Command)
+```bash
+./setup.sh  # Installs everything automatically (Homebrew, FFmpeg, Python, Node.js, deps)
+```
+
+### Setup (Manual)
 ```bash
 # Python environment
-python -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
@@ -32,6 +37,22 @@ npm run build            # Compile TypeScript to dist/
 npm start                # Run compiled version
 ```
 
+### Testing
+```bash
+# Python tests (from repo root)
+pytest                         # Run all tests with coverage
+pytest tests/unit              # Unit tests only
+pytest tests/integration       # Integration tests only
+pytest -k test_clean_text      # Run single test by name
+pytest -m slow                 # Run tests marked as slow
+
+# CLI tests (from cli/)
+cd cli
+npm test                       # Run all tests
+npm run test:watch             # Watch mode
+npm run test:coverage          # With coverage report
+```
+
 ### Direct Python Usage
 ```bash
 python app.py --input book.epub --output book.mp3 --voice af_heart --speed 1.0
@@ -41,9 +62,15 @@ python app.py --input book.epub --output book.mp3 --voice af_heart --speed 1.0
 
 ### Frontend (cli/src/)
 - `index.tsx` - Entry point
-- `App.tsx` - Main component with state machine: `welcome` → `files` → `config` → `processing` → `done`
-- `components/` - UI components (Header, FileSelector, ConfigPanel, BatchProgress, GpuMonitor, KeyboardHint)
+- `App.tsx` - Main component with state machine: `checking` → `setup-required`|`welcome` → `files` → `config` → `processing` → `done`
+- `components/` - UI components (Header, FileSelector, ConfigPanel, BatchProgress, GpuMonitor, KeyboardHint, SetupRequired)
 - `utils/tts-runner.ts` - Spawns Python process, sets MPS env vars, parses stdout progress
+- `utils/preflight.ts` - Checks for FFmpeg, Python venv, and Kokoro installation before starting
+
+### Setup Scripts (scripts/)
+- `setup-macos.sh` - Main setup logic for macOS (Homebrew, FFmpeg, Python, Node.js, venv, deps)
+- `check-python.sh` - Finds compatible Python (3.10-3.12) from Homebrew, pyenv, or system
+- `download-models.py` - Pre-downloads Kokoro TTS model (~1GB) before first use
 
 ### Backend (app.py)
 Uses sequential GPU inference + background encoding (optimized for Apple Silicon MPS):

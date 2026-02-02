@@ -83,7 +83,33 @@ Tune chunk size and more for optimal performance
 
 ## 🚀 Quick Start
 
-### Prerequisites
+### One-Command Setup (macOS)
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/lichen0114/ai_audiobook_fast.git
+cd ai_audiobook_fast
+
+# 2. Run the setup script (installs everything!)
+./setup.sh
+
+# 3. Start making audiobooks
+cd cli && npm run dev
+```
+
+The setup script will automatically:
+- Install Homebrew (if needed)
+- Install FFmpeg, Python 3.12, and Node.js
+- Set up the Python virtual environment
+- Install all dependencies
+- Optionally pre-download the AI model (~1GB)
+
+### Manual Installation
+
+<details>
+<summary>Click to expand manual setup instructions</summary>
+
+#### Prerequisites
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
@@ -91,7 +117,7 @@ Tune chunk size and more for optimal performance
 | Python | 3.10–3.12 | Kokoro TTS doesn't support 3.13+ yet |
 | FFmpeg | Latest | Required for MP3 export |
 
-### Installation
+#### Steps
 
 ```bash
 # 1. Clone the repository
@@ -102,7 +128,7 @@ cd ai_audiobook_fast
 brew install ffmpeg
 
 # 3. Set up Python environment
-python -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
@@ -110,14 +136,16 @@ pip install -r requirements.txt
 cd cli && npm install
 ```
 
+</details>
+
 ### Launch
 
 ```bash
 # Start the interactive CLI
 cd cli && npm run dev
 
-# For Apple Silicon GPU acceleration
-PYTORCH_ENABLE_MPS_FALLBACK=1 npm run dev
+# For Apple Silicon GPU acceleration (recommended for M1/M2/M3 Macs)
+cd cli && npm run dev:mps
 ```
 
 ---

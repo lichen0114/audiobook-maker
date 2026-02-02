@@ -5,12 +5,14 @@ import { FileSelector } from './components/FileSelector.js';
 import { ConfigPanel } from './components/ConfigPanel.js';
 import { BatchProgress } from './components/BatchProgress.js';
 import { WelcomeScreen } from './components/WelcomeScreen.js';
+import { SetupRequired } from './components/SetupRequired.js';
 import { KeyboardHint, DONE_HINTS, PROCESSING_HINTS } from './components/KeyboardHint.js';
+import { runPreflightChecks, quickCheck, type PreflightCheck } from './utils/preflight.js';
 import { exec } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
-export type Screen = 'welcome' | 'files' | 'config' | 'processing' | 'done';
+export type Screen = 'checking' | 'setup-required' | 'welcome' | 'files' | 'config' | 'processing' | 'done';
 
 export interface TTSConfig {
     voice: string;
@@ -71,11 +73,38 @@ function formatDuration(ms: number): string {
 
 export function App() {
     const { exit } = useApp();
-    const [screen, setScreen] = useState<Screen>('welcome');
+    const [screen, setScreen] = useState<Screen>('checking');
+    const [preflightChecks, setPreflightChecks] = useState<PreflightCheck[]>([]);
     const [files, setFiles] = useState<FileJob[]>([]);
     const [config, setConfig] = useState<TTSConfig>(defaultConfig);
     const [totalTime, setTotalTime] = useState<number>(0);
     const [startTime, setStartTime] = useState<number>(0);
+
+    // Run preflight checks on startup
+    useEffect(() => {
+        if (screen === 'checking') {
+            // Quick check first (fast)
+            if (quickCheck()) {
+                // Quick check passed, do full check
+                const result = runPreflightChecks();
+                if (result.passed) {
+                    setScreen('welcome');
+                } else {
+                    setPreflightChecks(result.checks);
+                    setScreen('setup-required');
+                }
+            } else {
+                // Quick check failed, do full check to get details
+                const result = runPreflightChecks();
+                setPreflightChecks(result.checks);
+                setScreen('setup-required');
+            }
+        }
+    }, [screen]);
+
+    const handleRetryChecks = () => {
+        setScreen('checking');
+    };
 
     useInput((input, key) => {
         if (input === 'q' || (key.ctrl && input === 'c')) {
@@ -152,6 +181,16 @@ export function App() {
     return (
         <Box flexDirection="column" padding={1}>
             <Header />
+
+            {screen === 'checking' && (
+                <Box marginTop={1} paddingX={2}>
+                    <Text dimColor>Checking dependencies...</Text>
+                </Box>
+            )}
+
+            {screen === 'setup-required' && (
+                <SetupRequired checks={preflightChecks} onRetry={handleRetryChecks} />
+            )}
 
             {screen === 'welcome' && (
                 <WelcomeScreen onStart={() => setScreen('files')} />
