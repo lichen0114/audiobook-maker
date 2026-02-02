@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import SelectInput from 'ink-select-input';
+import TextInput from 'ink-text-input';
+import * as path from 'path';
 import type { TTSConfig, FileJob } from '../App.js';
 
 interface ConfigPanelProps {
@@ -33,13 +35,15 @@ const speeds = [
     { label: '🚀 1.5x - Very Fast', value: '1.5' },
 ];
 
-type ConfigStep = 'voice' | 'speed' | 'gpu' | 'confirm';
+type ConfigStep = 'voice' | 'speed' | 'gpu' | 'output' | 'output_custom' | 'confirm';
 
 export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelProps) {
     const [step, setStep] = useState<ConfigStep>('voice');
     const [selectedVoice, setSelectedVoice] = useState(config.voice);
     const [selectedSpeed, setSelectedSpeed] = useState(config.speed);
     const [useMPS, setUseMPS] = useState(config.useMPS);
+    const [outputDir, setOutputDir] = useState<string | null>(config.outputDir);
+    const [customPath, setCustomPath] = useState('');
 
     useInput((input, key) => {
         if (key.escape || (step === 'voice' && key.backspace)) {
@@ -59,7 +63,24 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
 
     const handleGPUSelect = (item: { value: string }) => {
         setUseMPS(item.value === 'on');
-        setStep('confirm');
+        setStep('output');
+    };
+
+    const handleOutputSelect = (item: { value: string }) => {
+        if (item.value === 'same') {
+            setOutputDir(null);
+            setStep('confirm');
+        } else if (item.value === 'custom') {
+            setStep('output_custom');
+        }
+    };
+
+    const handleCustomPathSubmit = (value: string) => {
+        if (value.trim()) {
+            const resolvedPath = path.resolve(process.cwd(), value.trim());
+            setOutputDir(resolvedPath);
+            setStep('confirm');
+        }
     };
 
     const handleConfirm = (item: { value: string }) => {
@@ -69,6 +90,7 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                 voice: selectedVoice,
                 speed: selectedSpeed,
                 useMPS,
+                outputDir,
             });
         } else if (item.value === 'voice') {
             setStep('voice');
@@ -76,6 +98,8 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
             setStep('speed');
         } else if (item.value === 'gpu') {
             setStep('gpu');
+        } else if (item.value === 'output') {
+            setStep('output');
         }
     };
 
@@ -84,6 +108,11 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
 
     const getSpeedLabel = (value: number) =>
         speeds.find(s => parseFloat(s.value) === value)?.label || `${value}x`;
+
+    const getOutputLabel = () => {
+        if (!outputDir) return 'Same as input file';
+        return outputDir;
+    };
 
     return (
         <Box flexDirection="column" paddingX={2}>
@@ -113,6 +142,9 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                     </Text>
                     <Text>
                         🍎 GPU (Apple Silicon): <Text color={step === 'gpu' ? 'yellow' : useMPS ? 'green' : 'gray'}>{useMPS ? 'Enabled ⚡' : 'Disabled'}</Text>
+                    </Text>
+                    <Text>
+                        📁 Output: <Text color={step === 'output' || step === 'output_custom' ? 'yellow' : 'green'}>{getOutputLabel()}</Text>
                     </Text>
                 </Box>
             </Box>
@@ -159,6 +191,39 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                 </Box>
             )}
 
+            {/* Output Directory Selection */}
+            {step === 'output' && (
+                <Box flexDirection="column">
+                    <Text color="yellow" bold>Where to save output files?</Text>
+                    <Box marginTop={1}>
+                        <SelectInput
+                            items={[
+                                { label: '📂 Same folder as input file', value: 'same' },
+                                { label: '📁 Custom directory...', value: 'custom' },
+                            ]}
+                            onSelect={handleOutputSelect}
+                        />
+                    </Box>
+                </Box>
+            )}
+
+            {/* Custom Output Path Input */}
+            {step === 'output_custom' && (
+                <Box flexDirection="column">
+                    <Text color="yellow" bold>Enter output directory path:</Text>
+                    <Text dimColor>Relative or absolute path. Directory will be created if needed.</Text>
+                    <Box marginTop={1}>
+                        <Text color="green" bold>{'❯ '}</Text>
+                        <TextInput
+                            value={customPath}
+                            onChange={setCustomPath}
+                            onSubmit={handleCustomPathSubmit}
+                            placeholder="./output or /path/to/audiobooks"
+                        />
+                    </Box>
+                </Box>
+            )}
+
             {/* Confirmation */}
             {step === 'confirm' && (
                 <Box flexDirection="column">
@@ -170,6 +235,7 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                                 { label: '🎙️  Change Voice', value: 'voice' },
                                 { label: '⚡ Change Speed', value: 'speed' },
                                 { label: '🍎 Toggle GPU Acceleration', value: 'gpu' },
+                                { label: '📁 Change Output Directory', value: 'output' },
                             ]}
                             onSelect={handleConfirm}
                         />
@@ -183,3 +249,4 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
         </Box>
     );
 }
+
