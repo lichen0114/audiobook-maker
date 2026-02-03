@@ -47,6 +47,13 @@ export function runTTS(
             '--workers', (config.workers || 2).toString(),
             '--backend', config.backend || 'pytorch',
             '--format', config.outputFormat || 'mp3',
+            '--bitrate', config.bitrate || '192k',
+            ...(config.normalize ? ['--normalize'] : []),
+            ...(config.metadataTitle ? ['--title', config.metadataTitle] : []),
+            ...(config.metadataAuthor ? ['--author', config.metadataAuthor] : []),
+            ...(config.metadataCover ? ['--cover', config.metadataCover] : []),
+            ...(config.resume ? ['--resume'] : []),
+            ...(config.noCheckpoint ? ['--no_checkpoint'] : []),
             '--no_rich', // Disable rich progress bar to prevent CLI flashing
         ];
 

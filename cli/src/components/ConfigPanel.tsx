@@ -20,19 +20,29 @@ interface ConfigPanelProps {
     onBack: () => void;
 }
 
-const voices = [
-    { label: '💜 af_heart (American Female - Warm)', value: 'af_heart' },
-    { label: '💙 af_bella (American Female - Confident)', value: 'af_bella' },
-    { label: '💚 af_nicole (American Female - Friendly)', value: 'af_nicole' },
-    { label: '🧡 af_sarah (American Female - Professional)', value: 'af_sarah' },
-    { label: '💛 af_sky (American Female - Energetic)', value: 'af_sky' },
-    { label: '🤍 am_adam (American Male - Calm)', value: 'am_adam' },
-    { label: '🩵 am_michael (American Male - Authoritative)', value: 'am_michael' },
-    { label: '🩷 bf_emma (British Female - Elegant)', value: 'bf_emma' },
-    { label: '💜 bf_isabella (British Female - Sophisticated)', value: 'bf_isabella' },
-    { label: '🩶 bm_george (British Male - Classic)', value: 'bm_george' },
-    { label: '🤎 bm_lewis (British Male - Modern)', value: 'bm_lewis' },
+const accents = [
+    { label: '🇺🇸 American English', value: 'a' },
+    { label: '🇬🇧 British English', value: 'b' },
 ];
+
+const allVoices = [
+    // American voices
+    { label: '💜 af_heart (Female - Warm)', value: 'af_heart', accent: 'a' },
+    { label: '💙 af_bella (Female - Confident)', value: 'af_bella', accent: 'a' },
+    { label: '💚 af_nicole (Female - Friendly)', value: 'af_nicole', accent: 'a' },
+    { label: '🧡 af_sarah (Female - Professional)', value: 'af_sarah', accent: 'a' },
+    { label: '💛 af_sky (Female - Energetic)', value: 'af_sky', accent: 'a' },
+    { label: '🤍 am_adam (Male - Calm)', value: 'am_adam', accent: 'a' },
+    { label: '🩵 am_michael (Male - Authoritative)', value: 'am_michael', accent: 'a' },
+    // British voices
+    { label: '🩷 bf_emma (Female - Elegant)', value: 'bf_emma', accent: 'b' },
+    { label: '💜 bf_isabella (Female - Sophisticated)', value: 'bf_isabella', accent: 'b' },
+    { label: '🩶 bm_george (Male - Classic)', value: 'bm_george', accent: 'b' },
+    { label: '🤎 bm_lewis (Male - Modern)', value: 'bm_lewis', accent: 'b' },
+];
+
+// Legacy export for backward compatibility
+const voices = allVoices;
 
 const speeds = [
     { label: '🐢 0.75x - Slow', value: '0.75' },
@@ -53,10 +63,17 @@ const formats = [
     { label: '📖 M4B (With Chapters)', value: 'm4b' },
 ];
 
-type ConfigStep = 'voice' | 'speed' | 'backend' | 'format' | 'workers' | 'gpu' | 'output' | 'output_custom' | 'confirm';
+const bitrates = [
+    { label: '📻 128k (Smaller file)', value: '128k' },
+    { label: '🎧 192k (Balanced)', value: '192k' },
+    { label: '🎼 320k (High quality)', value: '320k' },
+];
+
+type ConfigStep = 'accent' | 'voice' | 'speed' | 'backend' | 'format' | 'quality' | 'workers' | 'gpu' | 'output' | 'output_custom' | 'confirm';
 
 export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelProps) {
-    const [step, setStep] = useState<ConfigStep>('voice');
+    const [step, setStep] = useState<ConfigStep>('accent');
+    const [selectedAccent, setSelectedAccent] = useState<'a' | 'b'>(config.langCode as 'a' | 'b' || 'a');
     const [selectedVoice, setSelectedVoice] = useState(config.voice);
     const [selectedSpeed, setSelectedSpeed] = useState(config.speed);
     const [selectedBackend, setSelectedBackend] = useState<'pytorch' | 'mlx'>(config.backend || 'pytorch');
@@ -66,12 +83,28 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
     const [useMPS, setUseMPS] = useState(config.useMPS);
     const [outputDir, setOutputDir] = useState<string | null>(config.outputDir);
     const [customPath, setCustomPath] = useState('');
+    const [selectedBitrate, setSelectedBitrate] = useState<'128k' | '192k' | '320k'>(config.bitrate || '192k');
+    const [normalize, setNormalize] = useState(config.normalize || false);
+
+    // Filter voices based on selected accent
+    const filteredVoices = allVoices.filter(v => v.accent === selectedAccent);
 
     useInput((input, key) => {
-        if (key.escape || (step === 'voice' && key.backspace)) {
+        if (key.escape || (step === 'accent' && key.backspace)) {
             onBack();
         }
     });
+
+    const handleAccentSelect = (item: { value: string }) => {
+        const accent = item.value as 'a' | 'b';
+        setSelectedAccent(accent);
+        // Reset voice to first voice of selected accent
+        const firstVoice = allVoices.find(v => v.accent === accent);
+        if (firstVoice) {
+            setSelectedVoice(firstVoice.value);
+        }
+        setStep('voice');
+    };
 
     const handleVoiceSelect = (item: { value: string }) => {
         setSelectedVoice(item.value);
@@ -98,6 +131,18 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
     const handleFormatSelect = (item: { value: string }) => {
         const format = item.value as 'mp3' | 'm4b';
         setSelectedFormat(format);
+        setStep('quality');
+    };
+
+    const handleQualitySelect = (item: { value: string }) => {
+        if (item.value === 'normalize_on') {
+            setNormalize(true);
+        } else if (item.value === 'normalize_off') {
+            setNormalize(false);
+        } else {
+            // Bitrate selection
+            setSelectedBitrate(item.value as '128k' | '192k' | '320k');
+        }
         setStep('workers');
     };
 
@@ -139,13 +184,18 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                 ...config,
                 voice: selectedVoice,
                 speed: selectedSpeed,
+                langCode: selectedAccent,
                 backend: selectedBackend,
                 outputFormat: selectedFormat,
                 chunkChars: selectedChunkChars,
                 workers: selectedWorkers,
                 useMPS,
                 outputDir,
+                bitrate: selectedBitrate,
+                normalize,
             });
+        } else if (item.value === 'accent') {
+            setStep('accent');
         } else if (item.value === 'voice') {
             setStep('voice');
         } else if (item.value === 'speed') {
@@ -154,6 +204,8 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
             setStep('backend');
         } else if (item.value === 'format') {
             setStep('format');
+        } else if (item.value === 'quality') {
+            setStep('quality');
         } else if (item.value === 'workers') {
             setStep('workers');
         } else if (item.value === 'gpu') {
@@ -166,6 +218,9 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
     const getVoiceLabel = (value: string) =>
         voices.find(v => v.value === value)?.label || value;
 
+    const getAccentLabel = (value: string) =>
+        accents.find(a => a.value === value)?.label || value;
+
     const getSpeedLabel = (value: number) =>
         speeds.find(s => parseFloat(s.value) === value)?.label || `${value}x`;
 
@@ -174,6 +229,9 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
 
     const getFormatLabel = (value: string) =>
         formats.find(f => f.value === value)?.label || value;
+
+    const getBitrateLabel = (value: string) =>
+        bitrates.find(b => b.value === value)?.label || value;
 
     const getOutputLabel = () => {
         if (!outputDir) return 'Same as input file';
@@ -201,6 +259,9 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                         📚 Files: <Text color="cyan">{files.length}</Text>
                     </Text>
                     <Text>
+                        🌐 Accent: <Text color={step === 'accent' ? 'yellow' : 'green'}>{getAccentLabel(selectedAccent)}</Text>
+                    </Text>
+                    <Text>
                         🎙️  Voice: <Text color={step === 'voice' ? 'yellow' : 'green'}>{getVoiceLabel(selectedVoice)}</Text>
                     </Text>
                     <Text>
@@ -211,6 +272,9 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                     </Text>
                     <Text>
                         💾 Format: <Text color={step === 'format' ? 'yellow' : 'green'}>{getFormatLabel(selectedFormat)}</Text>
+                    </Text>
+                    <Text>
+                        🎚️  Quality: <Text color={step === 'quality' ? 'yellow' : 'green'}>{getBitrateLabel(selectedBitrate)}{normalize ? ' + Normalized' : ''}</Text>
                     </Text>
                     <Text>
                         🔨 Workers: <Text color={step === 'workers' ? 'yellow' : 'green'}>{selectedWorkers}</Text>
@@ -224,12 +288,28 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                 </Box>
             </Box>
 
+            {/* Accent Selection */}
+            {step === 'accent' && (
+                <Box flexDirection="column">
+                    <Text color="yellow" bold>Select accent:</Text>
+                    <Text dimColor>Choose English accent for the narration</Text>
+                    <Box marginTop={1}>
+                        <SelectInput
+                            items={accents}
+                            onSelect={handleAccentSelect}
+                            initialIndex={accents.findIndex(a => a.value === selectedAccent)}
+                        />
+                    </Box>
+                </Box>
+            )}
+
             {/* Voice Selection */}
             {step === 'voice' && (
                 <Box flexDirection="column">
                     <Text color="yellow" bold>Select a voice:</Text>
+                    <Text dimColor>{selectedAccent === 'a' ? 'American' : 'British'} voices</Text>
                     <Box marginTop={1}>
-                        <SelectInput items={voices} onSelect={handleVoiceSelect} />
+                        <SelectInput items={filteredVoices} onSelect={handleVoiceSelect} />
                     </Box>
                 </Box>
             )}
@@ -274,6 +354,27 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                             onSelect={handleFormatSelect}
                             initialIndex={formats.findIndex(f => f.value === selectedFormat)}
                         />
+                    </Box>
+                </Box>
+            )}
+
+            {/* Quality Selection (Bitrate + Normalization) */}
+            {step === 'quality' && (
+                <Box flexDirection="column">
+                    <Text color="yellow" bold>Select audio quality:</Text>
+                    <Text dimColor>Higher bitrate = larger file, better quality</Text>
+                    <Box marginTop={1}>
+                        <SelectInput
+                            items={[
+                                ...bitrates,
+                                { label: `🔊 Normalize audio ${normalize ? '(Currently: ON)' : '(Currently: OFF)'}`, value: normalize ? 'normalize_off' : 'normalize_on' },
+                            ]}
+                            onSelect={handleQualitySelect}
+                            initialIndex={bitrates.findIndex(b => b.value === selectedBitrate)}
+                        />
+                    </Box>
+                    <Box marginTop={1}>
+                        <Text dimColor>Normalization adjusts loudness to -14 LUFS (podcast standard)</Text>
                     </Box>
                 </Box>
             )}
@@ -356,10 +457,12 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                         <SelectInput
                             items={[
                                 { label: '✅ Start Processing', value: 'start' },
+                                { label: '🌐 Change Accent', value: 'accent' },
                                 { label: '🎙️  Change Voice', value: 'voice' },
                                 { label: '⚡ Change Speed', value: 'speed' },
                                 { label: '🧠 Change Backend', value: 'backend' },
                                 { label: '💾 Change Format', value: 'format' },
+                                { label: '🎚️  Change Quality', value: 'quality' },
                                 { label: '🔨 Change Workers', value: 'workers' },
                                 ...(selectedBackend === 'pytorch' ? [{ label: '🍎 Toggle GPU Acceleration', value: 'gpu' }] : []),
                                 { label: '📁 Change Output Directory', value: 'output' },

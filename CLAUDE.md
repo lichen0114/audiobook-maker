@@ -50,6 +50,8 @@ npm run test:coverage           # With coverage
 python app.py --input book.epub --output book.mp3 --voice af_heart --speed 1.0
 python app.py --backend mlx --input book.epub --output book.mp3  # MLX backend (faster)
 python app.py --format m4b --input book.epub --output book.m4b   # M4B with chapters
+python app.py --bitrate 320k --normalize --input book.epub --output book.mp3  # High quality + normalization
+python app.py --resume --input book.epub --output book.mp3       # Resume from checkpoint
 ```
 
 ## Architecture
@@ -63,32 +65,50 @@ TTS backends are pluggable via an abstraction layer:
 
 The `--backend` flag selects which backend to use (`pytorch` or `mlx`). MLX requires separate installation (`pip install -r requirements-mlx.txt`).
 
+### Checkpoint System (`checkpoint.py`)
+Enables resumable processing for long audiobooks:
+- `CheckpointState` dataclass stores EPUB hash, config, completed chunks, chapter indices
+- Chunk audio saved as `.npy` files in `<output>.checkpoint/` directory
+- `--resume` loads checkpoint and skips completed chunks
+- `--no_checkpoint` disables checkpoint saving
+- Checkpoint automatically cleaned up after successful completion
+
 ### Frontend (`cli/src/`)
-- `App.tsx` - Main component with state machine: `checking` → `setup-required`|`welcome` → `files` → `config` → `processing` → `done`
+- `App.tsx` - Main component with state machine: `checking` → `setup-required`|`welcome` → `files` → `config` → `metadata` → `resume` → `processing` → `done`
 - `utils/tts-runner.ts` - Spawns Python process, sets MPS env vars (PyTorch only), parses stdout progress
 - `utils/preflight.ts` - Checks for FFmpeg, Python venv, Kokoro, and optionally MLX
+- `utils/metadata.ts` - Extracts EPUB metadata via Python backend
+- `utils/checkpoint.ts` - Checks for existing checkpoints via Python backend
+- `components/ConfigPanel.tsx` - Multi-step wizard: accent → voice → speed → backend → format → quality → workers → gpu → output
+- `components/MetadataEditor.tsx` - Edit M4B metadata (title/author/cover) before export
+- `components/ResumeDialog.tsx` - Resume or start fresh when checkpoint found
 
 ### Backend (`app.py`)
 Sequential inference + background encoding pipeline:
 1. Extract EPUB text and metadata, split into chunks (default: 900 chars for MLX, 600 for PyTorch)
-2. Backend generates audio sequentially, queues for encoding
-3. Background thread(s) convert audio to int16 numpy arrays (`--workers` controls parallelism)
-4. Results concatenated with `np.concatenate()` (O(n) vs O(n²)), tracking chapter sample positions
-5. Raw PCM piped to ffmpeg for MP3/M4B export (bypasses WAV 4GB limit)
+2. Check for checkpoint if `--resume` flag set
+3. Backend generates audio sequentially, queues for encoding
+4. Background thread(s) convert audio to int16 numpy arrays (`--workers` controls parallelism)
+5. Save chunk audio to checkpoint after each chunk (unless `--no_checkpoint`)
+6. Results concatenated with `np.concatenate()` (O(n) vs O(n²)), tracking chapter sample positions
+7. Raw PCM piped to ffmpeg for MP3/M4B export (bypasses WAV 4GB limit)
+8. Clean up checkpoint on successful completion
 
 **Why sequential GPU?** MPS serializes GPU operations; threading is 0.88x slower.
 
 **Why direct ffmpeg?** pydub creates intermediate WAV files with a 4GB limit (~24.9 hours). Long audiobooks exceed this.
 
 ### Output Formats
-- **MP3** (default): Standard audio format
-- **M4B**: Audiobook format with embedded chapter markers, book metadata (title/author), and cover art extracted from EPUB
+- **MP3** (default): Standard audio format with configurable bitrate (128k/192k/320k)
+- **M4B**: Audiobook format with embedded chapter markers, book metadata (title/author), and cover art
 
-Key M4B functions in `app.py`:
-- `extract_epub_metadata()` - Extracts title, author, cover from EPUB
-- `generate_ffmetadata()` - Creates FFMETADATA1 format for chapter markers
-- `export_pcm_to_m4b()` - Pipes PCM to ffmpeg with AAC encoding + chapters + cover
-- `split_text_to_chunks()` - Returns `(chunks, chapter_start_indices)` tuple for chapter tracking
+### Audio Quality Options
+- `--bitrate` - Audio bitrate: `128k` (smaller), `192k` (default), `320k` (high quality)
+- `--normalize` - Apply -14 LUFS loudness normalization (podcast standard)
+
+### Metadata Override (M4B)
+- `--extract_metadata` - Print EPUB metadata and exit
+- `--title` / `--author` / `--cover` - Override extracted metadata
 
 ### IPC Protocol
 Python outputs to stdout, parsed by `tts-runner.ts`:
@@ -99,10 +119,17 @@ PHASE:CONCATENATING        # Before np.concatenate()
 PHASE:EXPORTING            # Before MP3/M4B export
 METADATA:total_chars:N     # Character count
 METADATA:chapter_count:N   # Number of chapters
+METADATA:title:<title>     # Extracted book title
+METADATA:author:<author>   # Extracted author
+METADATA:has_cover:<bool>  # Cover image presence
 WORKER:0:INFER:Chunk X/Y   # Per-chunk status
 TIMING:chunk_idx:ms        # Per-chunk timing
 HEARTBEAT:timestamp        # Every 5 seconds
 PROGRESS:N/M chunks        # Overall progress
+CHECKPOINT:FOUND:T:C       # Checkpoint found (total:completed)
+CHECKPOINT:RESUMING:N      # Resuming from N completed chunks
+CHECKPOINT:SAVED:idx       # Chunk saved to checkpoint
+CHECKPOINT:CLEANED         # Checkpoint cleaned up
 ```
 
 ### MPS Environment Variables (PyTorch backend only)
@@ -118,5 +145,6 @@ When MPS is enabled, `tts-runner.ts` sets:
 
 ## Voice Options
 
-American: `af_heart` (default), `af_bella`, `af_nicole`, `af_sarah`, `af_sky`, `am_adam`, `am_michael`
-British: `bf_emma`, `bf_isabella`, `bm_george`, `bm_lewis`
+Voices are filtered by accent (`--lang_code`):
+- **American (a)**: `af_heart` (default), `af_bella`, `af_nicole`, `af_sarah`, `af_sky`, `am_adam`, `am_michael`
+- **British (b)**: `bf_emma`, `bf_isabella`, `bm_george`, `bm_lewis`

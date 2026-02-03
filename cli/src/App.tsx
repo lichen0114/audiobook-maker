@@ -3,16 +3,20 @@ import { Box, Text, useApp, useInput } from 'ink';
 import { Header } from './components/Header.js';
 import { FileSelector } from './components/FileSelector.js';
 import { ConfigPanel } from './components/ConfigPanel.js';
+import { MetadataEditor, type BookMetadata } from './components/MetadataEditor.js';
+import { ResumeDialog, type CheckpointInfo } from './components/ResumeDialog.js';
 import { BatchProgress } from './components/BatchProgress.js';
 import { WelcomeScreen } from './components/WelcomeScreen.js';
 import { SetupRequired } from './components/SetupRequired.js';
 import { KeyboardHint, DONE_HINTS, PROCESSING_HINTS } from './components/KeyboardHint.js';
 import { runPreflightChecks, quickCheck, type PreflightCheck } from './utils/preflight.js';
+import { extractMetadata } from './utils/metadata.js';
+import { checkCheckpoint, deleteCheckpoint } from './utils/checkpoint.js';
 import { exec } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
-export type Screen = 'checking' | 'setup-required' | 'welcome' | 'files' | 'config' | 'processing' | 'done';
+export type Screen = 'checking' | 'setup-required' | 'welcome' | 'files' | 'config' | 'metadata' | 'resume' | 'processing' | 'done';
 
 export interface TTSConfig {
     voice: string;
@@ -24,6 +28,15 @@ export interface TTSConfig {
     workers: number; // Number of parallel workers for audio encoding
     backend: 'pytorch' | 'mlx'; // TTS backend to use
     outputFormat: 'mp3' | 'm4b'; // Output format
+    bitrate: '128k' | '192k' | '320k'; // Audio bitrate
+    normalize: boolean; // Apply loudness normalization
+    // Metadata overrides for M4B
+    metadataTitle?: string;
+    metadataAuthor?: string;
+    metadataCover?: string;
+    // Checkpoint/resume options
+    resume?: boolean; // Resume from checkpoint if available
+    noCheckpoint?: boolean; // Disable checkpoint saving
 }
 
 export interface FileJob {
@@ -60,6 +73,8 @@ const defaultConfig: TTSConfig = {
     workers: 2, // Use 2 parallel workers by default (optimal for Apple Silicon MPS)
     backend: 'pytorch', // Default to PyTorch backend
     outputFormat: 'mp3', // Default to MP3 format
+    bitrate: '192k', // Default to 192k bitrate
+    normalize: false, // Loudness normalization off by default
 };
 
 function formatBytes(bytes: number): string {
@@ -91,6 +106,10 @@ export function App() {
     const [config, setConfig] = useState<TTSConfig>(defaultConfig);
     const [totalTime, setTotalTime] = useState<number>(0);
     const [startTime, setStartTime] = useState<number>(0);
+    const [bookMetadata, setBookMetadata] = useState<BookMetadata | null>(null);
+    const [metadataLoading, setMetadataLoading] = useState(false);
+    const [checkpointInfo, setCheckpointInfo] = useState<CheckpointInfo | null>(null);
+    const [shouldResume, setShouldResume] = useState(false);
 
     // Run preflight checks on startup
     useEffect(() => {
@@ -150,7 +169,7 @@ export function App() {
         setScreen('config');
     };
 
-    const handleConfigConfirm = (newConfig: TTSConfig) => {
+    const handleConfigConfirm = async (newConfig: TTSConfig) => {
         const ext = newConfig.outputFormat === 'm4b' ? '.m4b' : '.mp3';
         // Update output paths based on format and custom directory
         setFiles(prev => prev.map(file => {
@@ -161,6 +180,81 @@ export function App() {
             return { ...file, outputPath };
         }));
         setConfig(newConfig);
+
+        // For M4B format, show metadata editor before processing
+        if (newConfig.outputFormat === 'm4b' && files.length > 0) {
+            setMetadataLoading(true);
+            try {
+                const metadata = await extractMetadata(files[0].inputPath);
+                setBookMetadata({
+                    title: metadata.title,
+                    author: metadata.author,
+                    hasCover: metadata.hasCover,
+                });
+                setMetadataLoading(false);
+                setScreen('metadata');
+            } catch {
+                // If metadata extraction fails, proceed with defaults
+                setBookMetadata({
+                    title: 'Unknown Title',
+                    author: 'Unknown Author',
+                    hasCover: false,
+                });
+                setMetadataLoading(false);
+                setScreen('metadata');
+            }
+        } else {
+            // For non-M4B, skip metadata screen but still check for checkpoint
+            await checkForCheckpointAndProceed();
+        }
+    };
+
+    const handleMetadataConfirm = async (metadata: BookMetadata) => {
+        // Update config with metadata overrides
+        setConfig(prev => ({
+            ...prev,
+            metadataTitle: metadata.title,
+            metadataAuthor: metadata.author,
+            metadataCover: metadata.coverPath,
+        }));
+        // Check for checkpoint before processing
+        await checkForCheckpointAndProceed();
+    };
+
+    const checkForCheckpointAndProceed = async () => {
+        if (files.length > 0) {
+            try {
+                const status = await checkCheckpoint(files[0].inputPath, files[0].outputPath);
+                if (status.exists && status.valid && status.totalChunks && status.completedChunks) {
+                    // Found valid checkpoint - ask user what to do
+                    setCheckpointInfo({
+                        totalChunks: status.totalChunks,
+                        completedChunks: status.completedChunks,
+                    });
+                    setScreen('resume');
+                    return;
+                }
+            } catch {
+                // Checkpoint check failed, proceed without resume
+            }
+        }
+        // No valid checkpoint, start fresh
+        setShouldResume(false);
+        setStartTime(Date.now());
+        setScreen('processing');
+    };
+
+    const handleResumeChoice = async (resume: boolean) => {
+        if (resume) {
+            setShouldResume(true);
+            setConfig(prev => ({ ...prev, resume: true }));
+        } else {
+            // User chose to start fresh - delete checkpoint
+            setShouldResume(false);
+            if (files.length > 0) {
+                await deleteCheckpoint(files[0].outputPath);
+            }
+        }
         setStartTime(Date.now());
         setScreen('processing');
     };
@@ -218,6 +312,28 @@ export function App() {
                     config={config}
                     onConfirm={handleConfigConfirm}
                     onBack={() => setScreen('files')}
+                />
+            )}
+
+            {screen === 'metadata' && (
+                metadataLoading ? (
+                    <Box marginTop={1} paddingX={2}>
+                        <Text dimColor>Loading metadata from EPUB...</Text>
+                    </Box>
+                ) : bookMetadata ? (
+                    <MetadataEditor
+                        metadata={bookMetadata}
+                        onConfirm={handleMetadataConfirm}
+                        onBack={() => setScreen('config')}
+                    />
+                ) : null
+            )}
+
+            {screen === 'resume' && checkpointInfo && (
+                <ResumeDialog
+                    checkpoint={checkpointInfo}
+                    onResume={() => handleResumeChoice(true)}
+                    onStartFresh={() => handleResumeChoice(false)}
                 />
             )}
 

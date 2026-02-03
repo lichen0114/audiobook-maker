@@ -24,6 +24,17 @@ from rich.progress import (
 )
 
 from backends import create_backend, TTSBackend
+from checkpoint import (
+    CheckpointState,
+    compute_epub_hash,
+    get_checkpoint_dir,
+    save_checkpoint,
+    load_checkpoint,
+    save_chunk_audio,
+    load_all_chunk_audio,
+    cleanup_checkpoint,
+    verify_checkpoint,
+)
 
 
 DEFAULT_SAMPLE_RATE = 24000
@@ -266,10 +277,18 @@ def export_pcm_to_mp3(
     output_path: str,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     bitrate: str = "192k",
+    normalize: bool = False,
 ) -> None:
     """Export raw PCM int16 data directly to MP3 via ffmpeg.
 
     Bypasses pydub's WAV intermediate file, avoiding the 4GB limit.
+
+    Args:
+        pcm_data: Audio data as int16 numpy array
+        output_path: Path to output MP3 file
+        sample_rate: Audio sample rate
+        bitrate: Audio bitrate (128k, 192k, 320k)
+        normalize: Apply -14 LUFS loudness normalization
     """
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path is None:
@@ -293,9 +312,16 @@ def export_pcm_to_mp3(
         "-ar", str(sample_rate),
         "-ac", "1",              # mono
         "-i", "pipe:0",          # stdin
+    ]
+
+    # Add loudness normalization filter if requested
+    if normalize:
+        cmd.extend(["-af", "loudnorm=I=-14:TP=-1:LRA=11"])
+
+    cmd.extend([
         "-b:a", bitrate,
         "-y", output_path,
-    ]
+    ])
 
     proc = subprocess.run(cmd, input=pcm_data.tobytes(), capture_output=True)
     if proc.returncode != 0:
@@ -309,6 +335,7 @@ def export_pcm_to_m4b(
     chapters: List[ChapterInfo],
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     bitrate: str = "192k",
+    normalize: bool = False,
 ) -> None:
     """Export raw PCM int16 data to M4B with chapters and cover art via ffmpeg.
 
@@ -319,6 +346,7 @@ def export_pcm_to_m4b(
         chapters: List of chapter markers
         sample_rate: Audio sample rate
         bitrate: Audio bitrate for AAC encoding
+        normalize: Apply -14 LUFS loudness normalization
     """
     import tempfile
 
@@ -385,6 +413,10 @@ def export_pcm_to_m4b(
                 "-disposition:v:0", "attached_pic",
             ])
 
+        # Add loudness normalization filter if requested
+        if normalize:
+            cmd.extend(["-af", "loudnorm=I=-14:TP=-1:LRA=11"])
+
         cmd.extend([
             "-c:a", "aac",              # AAC audio codec
             "-b:a", bitrate,
@@ -446,6 +478,49 @@ def parse_args() -> argparse.Namespace:
         default="mp3",
         help="Output format: mp3 (default) or m4b (with chapters)",
     )
+    parser.add_argument(
+        "--bitrate",
+        default="192k",
+        choices=["128k", "192k", "320k"],
+        help="Audio bitrate (default: 192k)",
+    )
+    parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help="Apply loudness normalization (-14 LUFS)",
+    )
+    parser.add_argument(
+        "--extract_metadata",
+        action="store_true",
+        help="Extract and print EPUB metadata, then exit",
+    )
+    parser.add_argument(
+        "--title",
+        help="Override book title in M4B metadata",
+    )
+    parser.add_argument(
+        "--author",
+        help="Override book author in M4B metadata",
+    )
+    parser.add_argument(
+        "--cover",
+        help="Override cover image path for M4B",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from checkpoint if available",
+    )
+    parser.add_argument(
+        "--no_checkpoint",
+        action="store_true",
+        help="Disable checkpoint saving (no resume capability)",
+    )
+    parser.add_argument(
+        "--check_checkpoint",
+        action="store_true",
+        help="Check for existing checkpoint and report status, then exit",
+    )
     return parser.parse_args()
 
 
@@ -460,6 +535,33 @@ def main() -> None:
     if not os.path.exists(args.input):
         raise FileNotFoundError(f"Input EPUB not found: {args.input}")
 
+    # Handle --extract_metadata mode: print metadata and exit
+    if args.extract_metadata:
+        metadata = extract_epub_metadata(args.input)
+        print(f"METADATA:title:{metadata.title}", flush=True)
+        print(f"METADATA:author:{metadata.author}", flush=True)
+        print(f"METADATA:has_cover:{str(metadata.cover_image is not None).lower()}", flush=True)
+        return
+
+    # Checkpoint directory for this output file
+    checkpoint_dir = get_checkpoint_dir(args.output)
+    use_checkpoint = not args.no_checkpoint
+
+    # Handle --check_checkpoint mode: report checkpoint status and exit
+    if args.check_checkpoint:
+        state = load_checkpoint(checkpoint_dir)
+        if state is None:
+            print("CHECKPOINT:NONE", flush=True)
+        else:
+            # Verify the checkpoint matches current input
+            current_hash = compute_epub_hash(args.input)
+            if state.epub_hash != current_hash:
+                print("CHECKPOINT:INVALID:hash_mismatch", flush=True)
+            else:
+                completed = len(state.completed_chunks)
+                print(f"CHECKPOINT:FOUND:{state.total_chunks}:{completed}", flush=True)
+        return
+
     # Determine chunk size: use user-provided value or backend-optimal default
     chunk_chars = args.chunk_chars if args.chunk_chars is not None else DEFAULT_CHUNK_CHARS.get(args.backend, 600)
 
@@ -473,6 +575,42 @@ def main() -> None:
     if args.format == "m4b":
         book_metadata = extract_epub_metadata(args.input)
 
+        # Apply metadata overrides if provided
+        if args.title:
+            book_metadata = BookMetadata(
+                title=args.title,
+                author=book_metadata.author,
+                cover_image=book_metadata.cover_image,
+                cover_mime_type=book_metadata.cover_mime_type,
+            )
+        if args.author:
+            book_metadata = BookMetadata(
+                title=book_metadata.title,
+                author=args.author,
+                cover_image=book_metadata.cover_image,
+                cover_mime_type=book_metadata.cover_mime_type,
+            )
+        if args.cover:
+            # Load cover image from file
+            cover_path = args.cover
+            if os.path.exists(cover_path):
+                with open(cover_path, 'rb') as f:
+                    cover_data = f.read()
+                # Determine mime type from extension
+                ext = os.path.splitext(cover_path)[1].lower()
+                mime_type = {
+                    '.jpg': 'image/jpeg',
+                    '.jpeg': 'image/jpeg',
+                    '.png': 'image/png',
+                    '.gif': 'image/gif',
+                }.get(ext, 'image/jpeg')
+                book_metadata = BookMetadata(
+                    title=book_metadata.title,
+                    author=book_metadata.author,
+                    cover_image=cover_data,
+                    cover_mime_type=mime_type,
+                )
+
     # Emit metadata about extracted text
     total_chars = sum(len(chunk.text) for chunk in chunks)
     print(f"METADATA:total_chars:{total_chars}", flush=True)
@@ -481,16 +619,46 @@ def main() -> None:
     if not chunks:
         raise ValueError("No text chunks produced from EPUB.")
 
+    total_chunks = len(chunks)
+
+    # Checkpoint/resume handling
+    completed_chunks: set = set()
+    preloaded_audio: dict = {}
+    resuming = False
+
+    if use_checkpoint and args.resume:
+        # Try to resume from checkpoint
+        config_for_verify = {
+            'voice': args.voice,
+            'speed': args.speed,
+            'lang_code': args.lang_code,
+            'backend': args.backend,
+        }
+        if verify_checkpoint(checkpoint_dir, args.input, config_for_verify):
+            state = load_checkpoint(checkpoint_dir)
+            if state and state.total_chunks == total_chunks:
+                completed_chunks = set(state.completed_chunks)
+                preloaded_audio = load_all_chunk_audio(checkpoint_dir, total_chunks)
+                resuming = True
+                print(f"CHECKPOINT:RESUMING:{len(completed_chunks)}", flush=True)
+            else:
+                print("CHECKPOINT:INVALID:chunk_mismatch", flush=True)
+        else:
+            print("CHECKPOINT:INVALID:config_mismatch", flush=True)
+
     # Initialize the TTS backend
     backend = create_backend(args.backend)
     backend.initialize(lang_code=args.lang_code)
     sample_rate = backend.sample_rate
-    total_chunks = len(chunks)
 
     # Store results as int16 numpy arrays (not AudioSegments) for O(n) concatenation
     # Dict[chunk_idx, List[np.ndarray]]
     results_dict: dict = {}
     results_lock = threading.Lock()
+
+    # Load preloaded audio from checkpoint into results_dict
+    for idx, audio in preloaded_audio.items():
+        results_dict[idx] = [audio]
 
     # Queue for background CPU encoding: (chunk_idx, audio_tensor)
     encoding_queue: Queue = Queue()
@@ -507,7 +675,8 @@ def main() -> None:
             TimeElapsedColumn(),
             TimeRemainingColumn(),
         )
-        task_id = progress.add_task("tts", total=total_chunks)
+        # Start progress bar at the number of already-completed chunks if resuming
+        task_id = progress.add_task("tts", total=total_chunks, completed=len(completed_chunks))
 
     times: List[float] = []
 
@@ -537,14 +706,43 @@ def main() -> None:
     print("PHASE:INFERENCE", flush=True)
     last_heartbeat = time.time()
 
+    # Create initial checkpoint state if checkpointing is enabled
+    if use_checkpoint:
+        epub_hash = compute_epub_hash(args.input)
+        checkpoint_config = {
+            'voice': args.voice,
+            'speed': args.speed,
+            'lang_code': args.lang_code,
+            'backend': args.backend,
+            'chunk_chars': chunk_chars,
+        }
+        checkpoint_state = CheckpointState(
+            epub_hash=epub_hash,
+            config=checkpoint_config,
+            total_chunks=total_chunks,
+            completed_chunks=list(completed_chunks),
+            chapter_start_indices=chapter_start_indices,
+        )
+        save_checkpoint(checkpoint_dir, checkpoint_state)
+
     def run_inference():
         """Main thread: sequential GPU inference."""
         nonlocal last_heartbeat
-        for idx, chunk in enumerate(chunks):
+        chunks_to_process = [
+            (idx, chunk) for idx, chunk in enumerate(chunks)
+            if idx not in completed_chunks
+        ]
+
+        processed_count = len(completed_chunks)
+
+        for idx, chunk in chunks_to_process:
             start = time.perf_counter()
 
             # Status: Inference
             print(f"WORKER:0:INFER:Chunk {idx+1}/{total_chunks}", flush=True)
+
+            # Collect all audio segments for this chunk
+            chunk_audio_segments: List[np.ndarray] = []
 
             # Inference - sequential for optimal performance
             for audio in backend.generate(
@@ -555,9 +753,25 @@ def main() -> None:
             ):
                 # Queue audio for background CPU encoding
                 encoding_queue.put((idx, audio))
+                # Also collect for checkpoint
+                chunk_audio_segments.append(audio_to_int16(audio))
 
             elapsed = time.perf_counter() - start
             times.append(elapsed)
+
+            # Save chunk to checkpoint
+            if use_checkpoint and chunk_audio_segments:
+                # Concatenate all segments for this chunk
+                chunk_audio = np.concatenate(chunk_audio_segments) if len(chunk_audio_segments) > 1 else chunk_audio_segments[0]
+                save_chunk_audio(checkpoint_dir, idx, chunk_audio)
+
+                # Update checkpoint state
+                completed_chunks.add(idx)
+                checkpoint_state.completed_chunks = list(completed_chunks)
+                save_checkpoint(checkpoint_dir, checkpoint_state)
+                print(f"CHECKPOINT:SAVED:{idx}", flush=True)
+
+            processed_count += 1
 
             # Emit per-chunk timing
             print(f"TIMING:{idx}:{int(elapsed*1000)}", flush=True)
@@ -571,7 +785,7 @@ def main() -> None:
             # Update progress
             if progress and task_id is not None:
                 progress.update(task_id, advance=1)
-            print(f"PROGRESS:{idx+1}/{total_chunks} chunks", flush=True)
+            print(f"PROGRESS:{processed_count}/{total_chunks} chunks", flush=True)
 
         # Signal encoding thread to finish
         encoding_queue.put(None)
@@ -645,15 +859,27 @@ def main() -> None:
             metadata=book_metadata,
             chapters=chapter_infos,
             sample_rate=sample_rate,
-            bitrate="192k"
+            bitrate=args.bitrate,
+            normalize=args.normalize,
         )
     else:
-        export_pcm_to_mp3(combined_np, args.output, sample_rate=sample_rate, bitrate="192k")
+        export_pcm_to_mp3(
+            combined_np,
+            args.output,
+            sample_rate=sample_rate,
+            bitrate=args.bitrate,
+            normalize=args.normalize,
+        )
 
     avg_time = sum(times) / max(len(times), 1)
 
     # Cleanup backend resources
     backend.cleanup()
+
+    # Clean up checkpoint after successful completion
+    if use_checkpoint:
+        cleanup_checkpoint(checkpoint_dir)
+        print("CHECKPOINT:CLEANED", flush=True)
 
     print("\nDone.")
     print(f"Output: {args.output}")
