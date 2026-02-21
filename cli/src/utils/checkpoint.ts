@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import * as path from 'path';
+import { resolvePythonRuntime } from './python-runtime.js';
 
 export interface CheckpointStatus {
     exists: boolean;
@@ -17,10 +17,7 @@ export function checkCheckpoint(
     outputPath: string
 ): Promise<CheckpointStatus> {
     return new Promise((resolve, reject) => {
-        // Get the project root (parent of cli directory)
-        const projectRoot = path.resolve(import.meta.dirname, '../../..');
-        const pythonScript = path.join(projectRoot, 'app.py');
-        const venvPython = path.join(projectRoot, '.venv', 'bin', 'python');
+        const { projectRoot, appPath: pythonScript, pythonPath } = resolvePythonRuntime();
 
         const args = [
             pythonScript,
@@ -29,7 +26,7 @@ export function checkCheckpoint(
             '--check_checkpoint',
         ];
 
-        const process = spawn(venvPython, args, {
+        const process = spawn(pythonPath, args, {
             cwd: projectRoot,
             env: {
                 ...globalThis.process.env,

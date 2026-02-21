@@ -1,5 +1,7 @@
 import argparse
+from contextlib import nullcontext
 import importlib.util
+import json
 import os
 import platform
 import re
@@ -9,7 +11,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import Any, BinaryIO, Dict, List, Optional, TextIO, Tuple
 
 import numpy as np
 from bs4 import BeautifulSoup
@@ -48,31 +50,148 @@ DEFAULT_CHUNK_CHARS = {
     'pytorch': 600,
 }
 
+_AUTO_BACKEND_CACHE: Optional[str] = None
+
+
+class EventEmitter:
+    """Emit progress/log events in legacy text or structured JSON format."""
+
+    def __init__(
+        self,
+        event_format: str = "text",
+        job_id: str = "job",
+        log_file: Optional[str] = None,
+    ):
+        self.event_format = event_format
+        self.job_id = job_id
+        self._log_fp: Optional[TextIO] = None
+
+        if log_file:
+            log_dir = os.path.dirname(os.path.abspath(log_file))
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            self._log_fp = open(log_file, "a", encoding="utf-8")
+
+    def _write(self, line: str, *, stderr: bool = False) -> None:
+        stream = sys.stderr if stderr else sys.stdout
+        print(line, file=stream, flush=True)
+        if self._log_fp is not None:
+            self._log_fp.write(line + "\n")
+            self._log_fp.flush()
+
+    def close(self) -> None:
+        if self._log_fp is not None:
+            self._log_fp.close()
+            self._log_fp = None
+
+    def _emit_json(self, event_type: str, **payload: Any) -> None:
+        body = {
+            "type": event_type,
+            "ts_ms": int(time.time() * 1000),
+            "job_id": self.job_id,
+            **payload,
+        }
+        self._write(json.dumps(body, ensure_ascii=False))
+
+    def _emit_text_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+        if event_type == "phase":
+            self._write(f"PHASE:{payload['phase']}")
+            return
+        if event_type == "metadata":
+            self._write(f"METADATA:{payload['key']}:{payload['value']}")
+            return
+        if event_type == "timing":
+            self._write(f"TIMING:{payload['chunk_idx']}:{payload['chunk_timing_ms']}")
+            return
+        if event_type == "heartbeat":
+            self._write(f"HEARTBEAT:{payload['heartbeat_ts']}")
+            return
+        if event_type == "worker":
+            self._write(
+                f"WORKER:{payload['id']}:{payload['status']}:{payload['details']}"
+            )
+            return
+        if event_type == "progress":
+            self._write(
+                f"PROGRESS:{payload['current_chunk']}/{payload['total_chunks']} chunks"
+            )
+            return
+        if event_type == "checkpoint":
+            code = payload.get("code")
+            detail = payload.get("detail")
+            if detail is not None:
+                self._write(f"CHECKPOINT:{code}:{detail}")
+            else:
+                self._write(f"CHECKPOINT:{code}")
+            return
+        if event_type == "error":
+            self._write(payload["message"], stderr=True)
+            return
+        if event_type == "done":
+            self._write("DONE")
+            return
+
+    def emit(self, event_type: str, **payload: Any) -> None:
+        if self.event_format == "json":
+            self._emit_json(event_type, **payload)
+        else:
+            self._emit_text_event(event_type, payload)
+
+    def info(self, message: str) -> None:
+        if self.event_format == "json":
+            self._emit_json("log", level="info", message=message)
+        else:
+            self._write(message)
+
+    def warn(self, message: str) -> None:
+        if self.event_format == "json":
+            self._emit_json("log", level="warning", message=message)
+        else:
+            self._write(f"WARN: {message}", stderr=True)
+
+    def error(self, message: str) -> None:
+        if self.event_format == "json":
+            self._emit_json("error", message=message)
+        else:
+            self._write(message, stderr=True)
+
 
 def resolve_backend(backend: str) -> str:
     """Resolve backend selection, supporting auto-detection on Apple Silicon."""
+    global _AUTO_BACKEND_CACHE
+
     if backend != "auto":
         return backend
 
+    if _AUTO_BACKEND_CACHE is not None:
+        return _AUTO_BACKEND_CACHE
+
     if sys.platform == "darwin" and platform.machine() == "arm64":
         if importlib.util.find_spec("mlx_audio") is None:
-            return "pytorch"
+            _AUTO_BACKEND_CACHE = "pytorch"
+            return _AUTO_BACKEND_CACHE
 
         # Probe MLX runtime in a subprocess so native crashes cannot
         # terminate the main process.
-        probe = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "import mlx.core as mx; mx.array([1.0]); print('ok')",
-            ],
-            capture_output=True,
-            timeout=8,
-        )
-        if probe.returncode == 0:
-            return "mlx"
+        try:
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import mlx.core as mx; mx.array([1.0]); print('ok')",
+                ],
+                capture_output=True,
+                timeout=8,
+            )
+            if probe.returncode == 0:
+                _AUTO_BACKEND_CACHE = "mlx"
+                return _AUTO_BACKEND_CACHE
+        except subprocess.TimeoutExpired:
+            _AUTO_BACKEND_CACHE = "pytorch"
+            return _AUTO_BACKEND_CACHE
 
-    return "pytorch"
+    _AUTO_BACKEND_CACHE = "pytorch"
+    return _AUTO_BACKEND_CACHE
 
 
 @dataclass
@@ -185,6 +304,41 @@ def split_text_to_chunks(
     chunks: List[TextChunk] = []
     chapter_start_indices: List[Tuple[int, str]] = []
 
+    def split_oversized_paragraph(paragraph: str) -> List[str]:
+        """Split oversized paragraphs into sentence-aware chunks."""
+        if len(paragraph) <= chunk_chars:
+            return [paragraph]
+
+        pieces: List[str] = []
+        sentences = re.split(r"(?<=[.!?])\s+", paragraph)
+        sentence_buffer = ""
+
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+
+            if len(sentence) > chunk_chars:
+                if sentence_buffer:
+                    pieces.append(sentence_buffer)
+                    sentence_buffer = ""
+                for start in range(0, len(sentence), chunk_chars):
+                    pieces.append(sentence[start:start + chunk_chars])
+                continue
+
+            candidate = f"{sentence_buffer} {sentence}".strip()
+            if len(candidate) <= chunk_chars:
+                sentence_buffer = candidate
+            else:
+                if sentence_buffer:
+                    pieces.append(sentence_buffer)
+                sentence_buffer = sentence
+
+        if sentence_buffer:
+            pieces.append(sentence_buffer)
+
+        return pieces if pieces else [paragraph]
+
     for title, text in chapters:
         paragraphs = [p.strip() for p in re.split(r"\n+", text) if p.strip()]
         if not paragraphs:
@@ -195,12 +349,13 @@ def split_text_to_chunks(
 
         buffer = ""
         for paragraph in paragraphs:
-            if len(buffer) + len(paragraph) + 1 <= chunk_chars:
-                buffer = f"{buffer} {paragraph}".strip()
-            else:
-                if buffer:
-                    chunks.append(TextChunk(title, buffer))
-                buffer = paragraph
+            for piece in split_oversized_paragraph(paragraph):
+                if len(buffer) + len(piece) + 1 <= chunk_chars:
+                    buffer = f"{buffer} {piece}".strip()
+                else:
+                    if buffer:
+                        chunks.append(TextChunk(title, buffer))
+                    buffer = piece
 
         if buffer:
             chunks.append(TextChunk(title, buffer))
@@ -515,6 +670,56 @@ def export_pcm_file_to_mp3(
         raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode()}")
 
 
+def open_mp3_export_stream(
+    output_path: str,
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
+    bitrate: str = "192k",
+    normalize: bool = False,
+) -> subprocess.Popen:
+    """Open ffmpeg process that accepts PCM s16le data via stdin and emits MP3."""
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        raise FileNotFoundError(
+            "ffmpeg not found. Install with: brew install ffmpeg"
+        )
+
+    cmd = [
+        ffmpeg_path,
+        "-f", "s16le",
+        "-ar", str(sample_rate),
+        "-ac", "1",
+        "-i", "pipe:0",
+    ]
+
+    if normalize:
+        cmd.extend(["-af", "loudnorm=I=-14:TP=-1:LRA=11"])
+
+    cmd.extend([
+        "-b:a", bitrate,
+        "-y", output_path,
+    ])
+
+    return subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def close_mp3_export_stream(proc: subprocess.Popen) -> None:
+    """Finalize ffmpeg MP3 stream and raise on failures."""
+    if proc.stdin is not None:
+        proc.stdin.close()
+    stderr = b""
+    if proc.stderr is not None:
+        stderr = proc.stderr.read()
+    return_code = proc.wait()
+    if return_code != 0:
+        err = stderr.decode("utf-8", errors="replace")
+        raise RuntimeError(f"ffmpeg failed: {err}")
+
+
 def export_pcm_file_to_m4b(
     pcm_path: str,
     output_path: str,
@@ -630,7 +835,7 @@ def parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         default=2,
-        help="Number of parallel workers for audio encoding (default: 2)",
+        help="Reserved compatibility flag. Current pipeline is sequential (default: 2).",
     )
     parser.add_argument(
         "--no_rich",
@@ -697,6 +902,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Check for existing checkpoint and report status, then exit",
     )
+    parser.add_argument(
+        "--event_format",
+        choices=["text", "json"],
+        default="text",
+        help="IPC event output format (default: text)",
+    )
+    parser.add_argument(
+        "--log_file",
+        help="Optional path to append backend logs",
+    )
     return parser.parse_args()
 
 
@@ -707,89 +922,113 @@ def main() -> None:
         )
 
     args = parse_args()
+    events = EventEmitter(
+        event_format=args.event_format,
+        job_id=os.path.basename(args.output) or "job",
+        log_file=args.log_file,
+    )
 
-    if not os.path.exists(args.input):
-        raise FileNotFoundError(f"Input EPUB not found: {args.input}")
+    try:
+        if not os.path.exists(args.input):
+            raise FileNotFoundError(f"Input EPUB not found: {args.input}")
 
-    if args.no_checkpoint:
-        print(
-            "WARN: --no_checkpoint is deprecated and has no effect (checkpointing is opt-in via --checkpoint).",
-            file=sys.stderr,
-            flush=True,
+        if args.no_checkpoint:
+            events.warn(
+                "--no_checkpoint is deprecated and has no effect "
+                "(checkpointing is opt-in via --checkpoint)."
+            )
+
+        if args.workers != 1:
+            events.warn(
+                f"--workers={args.workers} is currently a compatibility setting. "
+                "Inference remains sequential."
+            )
+
+        # Handle --extract_metadata mode: print metadata and exit
+        if args.extract_metadata:
+            metadata = extract_epub_metadata(args.input)
+            events.emit("metadata", key="title", value=metadata.title)
+            events.emit("metadata", key="author", value=metadata.author)
+            events.emit(
+                "metadata",
+                key="has_cover",
+                value=str(metadata.cover_image is not None).lower(),
+            )
+            return
+
+        # Checkpoint directory for this output file
+        checkpoint_dir = get_checkpoint_dir(args.output)
+        use_checkpoint = args.checkpoint or args.resume
+
+        # Handle --check_checkpoint mode: report checkpoint status and exit
+        if args.check_checkpoint:
+            state = load_checkpoint(checkpoint_dir)
+            if state is None:
+                events.emit("checkpoint", code="NONE")
+            else:
+                # Verify the checkpoint matches current input
+                current_hash = compute_epub_hash(args.input)
+                if state.epub_hash != current_hash:
+                    events.emit("checkpoint", code="INVALID", detail="hash_mismatch")
+                else:
+                    completed = len(state.completed_chunks)
+                    events.emit(
+                        "checkpoint",
+                        code="FOUND",
+                        detail=f"{state.total_chunks}:{completed}",
+                    )
+            return
+
+        resolved_backend = resolve_backend(args.backend)
+        events.emit("metadata", key="backend_resolved", value=resolved_backend)
+
+        # Determine chunk size: use user-provided value or backend-optimal default
+        chunk_chars = (
+            args.chunk_chars
+            if args.chunk_chars is not None
+            else DEFAULT_CHUNK_CHARS.get(resolved_backend, 600)
         )
 
-    # Handle --extract_metadata mode: print metadata and exit
-    if args.extract_metadata:
-        metadata = extract_epub_metadata(args.input)
-        print(f"METADATA:title:{metadata.title}", flush=True)
-        print(f"METADATA:author:{metadata.author}", flush=True)
-        print(f"METADATA:has_cover:{str(metadata.cover_image is not None).lower()}", flush=True)
-        return
+        # Phase: Parsing
+        events.emit("phase", phase="PARSING")
+        chapters = extract_epub_text(args.input)
+        chunks, chapter_start_indices = split_text_to_chunks(chapters, chunk_chars)
 
-    # Checkpoint directory for this output file
-    checkpoint_dir = get_checkpoint_dir(args.output)
-    use_checkpoint = args.checkpoint or args.resume
+        # Extract book metadata for M4B format
+        book_metadata = None
+        if args.format == "m4b":
+            book_metadata = extract_epub_metadata(args.input)
 
-    # Handle --check_checkpoint mode: report checkpoint status and exit
-    if args.check_checkpoint:
-        state = load_checkpoint(checkpoint_dir)
-        if state is None:
-            print("CHECKPOINT:NONE", flush=True)
-        else:
-            # Verify the checkpoint matches current input
-            current_hash = compute_epub_hash(args.input)
-            if state.epub_hash != current_hash:
-                print("CHECKPOINT:INVALID:hash_mismatch", flush=True)
-            else:
-                completed = len(state.completed_chunks)
-                print(f"CHECKPOINT:FOUND:{state.total_chunks}:{completed}", flush=True)
-        return
-
-    resolved_backend = resolve_backend(args.backend)
-    print(f"METADATA:backend_resolved:{resolved_backend}", flush=True)
-
-    # Determine chunk size: use user-provided value or backend-optimal default
-    chunk_chars = args.chunk_chars if args.chunk_chars is not None else DEFAULT_CHUNK_CHARS.get(resolved_backend, 600)
-
-    # Phase: Parsing
-    print("PHASE:PARSING", flush=True)
-    chapters = extract_epub_text(args.input)
-    chunks, chapter_start_indices = split_text_to_chunks(chapters, chunk_chars)
-
-    # Extract book metadata for M4B format
-    book_metadata = None
-    if args.format == "m4b":
-        book_metadata = extract_epub_metadata(args.input)
-
-        # Apply metadata overrides if provided
-        if args.title:
-            book_metadata = BookMetadata(
-                title=args.title,
-                author=book_metadata.author,
-                cover_image=book_metadata.cover_image,
-                cover_mime_type=book_metadata.cover_mime_type,
-            )
-        if args.author:
-            book_metadata = BookMetadata(
-                title=book_metadata.title,
-                author=args.author,
-                cover_image=book_metadata.cover_image,
-                cover_mime_type=book_metadata.cover_mime_type,
-            )
-        if args.cover:
-            # Load cover image from file
-            cover_path = args.cover
-            if os.path.exists(cover_path):
-                with open(cover_path, 'rb') as f:
+            # Apply metadata overrides if provided
+            if args.title:
+                book_metadata = BookMetadata(
+                    title=args.title,
+                    author=book_metadata.author,
+                    cover_image=book_metadata.cover_image,
+                    cover_mime_type=book_metadata.cover_mime_type,
+                )
+            if args.author:
+                book_metadata = BookMetadata(
+                    title=book_metadata.title,
+                    author=args.author,
+                    cover_image=book_metadata.cover_image,
+                    cover_mime_type=book_metadata.cover_mime_type,
+                )
+            if args.cover:
+                cover_path = os.path.abspath(args.cover)
+                if not os.path.exists(cover_path):
+                    raise FileNotFoundError(
+                        f"Cover override file not found: {cover_path}"
+                    )
+                with open(cover_path, "rb") as f:
                     cover_data = f.read()
-                # Determine mime type from extension
                 ext = os.path.splitext(cover_path)[1].lower()
                 mime_type = {
-                    '.jpg': 'image/jpeg',
-                    '.jpeg': 'image/jpeg',
-                    '.png': 'image/png',
-                    '.gif': 'image/gif',
-                }.get(ext, 'image/jpeg')
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".png": "image/png",
+                    ".gif": "image/gif",
+                }.get(ext, "image/jpeg")
                 book_metadata = BookMetadata(
                     title=book_metadata.title,
                     author=book_metadata.author,
@@ -797,258 +1036,379 @@ def main() -> None:
                     cover_mime_type=mime_type,
                 )
 
-    # Emit metadata about extracted text
-    total_chars = sum(len(chunk.text) for chunk in chunks)
-    print(f"METADATA:total_chars:{total_chars}", flush=True)
-    print(f"METADATA:chapter_count:{len(chapter_start_indices)}", flush=True)
+        # Emit metadata about extracted text
+        total_chars = sum(len(chunk.text) for chunk in chunks)
+        events.emit("metadata", key="total_chars", value=total_chars)
+        events.emit("metadata", key="chapter_count", value=len(chapter_start_indices))
 
-    if not chunks:
-        raise ValueError("No text chunks produced from EPUB.")
+        if not chunks:
+            raise ValueError("No text chunks produced from EPUB.")
 
-    total_chunks = len(chunks)
+        total_chunks = len(chunks)
 
-    # Checkpoint/resume handling
-    completed_chunks: set[int] = set()
-    checkpoint_state = None
+        # Checkpoint/resume handling
+        completed_chunks: set[int] = set()
+        checkpoint_state = None
 
-    if use_checkpoint and args.resume:
-        # Try to resume from checkpoint
-        config_for_verify = {
-            'voice': args.voice,
-            'speed': args.speed,
-            'lang_code': args.lang_code,
-            'backend': resolved_backend,
-            'chunk_chars': chunk_chars,
-        }
-        if verify_checkpoint(checkpoint_dir, args.input, config_for_verify):
-            state = load_checkpoint(checkpoint_dir)
-            if state and state.total_chunks == total_chunks:
-                completed_chunks = set(state.completed_chunks)
-                checkpoint_state = state
-                print(f"CHECKPOINT:RESUMING:{len(completed_chunks)}", flush=True)
-            else:
-                print("CHECKPOINT:INVALID:chunk_mismatch", flush=True)
-        else:
-            print("CHECKPOINT:INVALID:config_mismatch", flush=True)
-
-    backend: Optional[TTSBackend] = None
-    spool_path: Optional[str] = None
-    should_cleanup_checkpoint = False
-    sample_rate = DEFAULT_SAMPLE_RATE
-
-    try:
-        # Initialize the TTS backend
-        backend = create_backend(resolved_backend)
-        backend.initialize(lang_code=args.lang_code)
-        sample_rate = backend.sample_rate
-
-        # Create spool file for incremental PCM writes to avoid RAM spikes
-        spool_file = tempfile.NamedTemporaryFile(suffix=".pcm", delete=False)
-        spool_path = spool_file.name
-        spool_file.close()
-
-        chunk_sample_offsets: List[int] = [0] * total_chunks
-        cumulative_samples = 0
-
-        # Rebuild spool by streaming contiguous checkpoint chunks (if resuming)
-        if use_checkpoint and args.resume and completed_chunks:
-            contiguous = 0
-            with open(spool_path, "wb") as spool:
-                while contiguous < total_chunks and contiguous in completed_chunks:
-                    chunk_audio = load_chunk_audio(checkpoint_dir, contiguous)
-                    if chunk_audio is None:
-                        break
-                    if chunk_audio.dtype != np.int16:
-                        chunk_audio = audio_to_int16(chunk_audio)
-                    chunk_sample_offsets[contiguous] = cumulative_samples
-                    spool.write(chunk_audio.tobytes())
-                    cumulative_samples += len(chunk_audio)
-                    contiguous += 1
-
-            if contiguous != len(completed_chunks):
-                print(
-                    f"CHECKPOINT:PARTIAL_PREFIX:{contiguous}",
-                    flush=True,
-                )
-            completed_chunks = set(range(contiguous))
-
-        # Create initial checkpoint state if checkpointing is enabled
-        if use_checkpoint:
-            if checkpoint_state is None:
-                epub_hash = compute_epub_hash(args.input)
-                checkpoint_config = {
-                    'voice': args.voice,
-                    'speed': args.speed,
-                    'lang_code': args.lang_code,
-                    'backend': resolved_backend,
-                    'chunk_chars': chunk_chars,
-                }
-                checkpoint_state = CheckpointState(
-                    epub_hash=epub_hash,
-                    config=checkpoint_config,
-                    total_chunks=total_chunks,
-                    completed_chunks=sorted(completed_chunks),
-                    chapter_start_indices=chapter_start_indices,
-                )
-            else:
-                checkpoint_state.completed_chunks = sorted(completed_chunks)
-            save_checkpoint(checkpoint_dir, checkpoint_state)
-
-        progress = None
-        task_id = None
-        if not args.no_rich:
-            progress = Progress(
-                TextColumn("[bold]Generating[/bold]"),
-                BarColumn(),
-                TextColumn("{task.completed}/{task.total} chunks"),
-                TimeElapsedColumn(),
-                TimeRemainingColumn(),
-            )
-            task_id = progress.add_task("tts", total=total_chunks, completed=len(completed_chunks))
-
-        times: List[float] = []
-        last_heartbeat = time.time()
-
-        print(
-            f"Processing {total_chunks} chunks with {backend.name} backend (sequential inference + disk spooling)",
-            flush=True,
-        )
-
-        # Phase: Inference
-        print("PHASE:INFERENCE", flush=True)
-
-        def run_inference() -> None:
-            nonlocal last_heartbeat, cumulative_samples
-            processed_count = len(completed_chunks)
-            with open(spool_path, "ab") as spool:
-                for idx, chunk in enumerate(chunks):
-                    if idx in completed_chunks:
-                        continue
-
-                    start = time.perf_counter()
-                    print(f"WORKER:0:INFER:Chunk {idx+1}/{total_chunks}", flush=True)
-
-                    chunk_sample_offsets[idx] = cumulative_samples
-                    chunk_audio_segments: List[np.ndarray] = []
-
-                    for audio in backend.generate(
-                        text=chunk.text,
-                        voice=args.voice,
-                        speed=args.speed,
-                        split_pattern=args.split_pattern,
-                    ):
-                        int16_audio = audio_to_int16(audio)
-                        spool.write(int16_audio.tobytes())
-                        cumulative_samples += len(int16_audio)
-                        if use_checkpoint:
-                            chunk_audio_segments.append(int16_audio)
-
-                    elapsed = time.perf_counter() - start
-                    times.append(elapsed)
-
-                    if use_checkpoint:
-                        if chunk_audio_segments:
-                            chunk_audio = (
-                                np.concatenate(chunk_audio_segments)
-                                if len(chunk_audio_segments) > 1
-                                else chunk_audio_segments[0]
-                            )
-                        else:
-                            chunk_audio = np.array([], dtype=np.int16)
-
-                        save_chunk_audio(checkpoint_dir, idx, chunk_audio)
-                        completed_chunks.add(idx)
-                        checkpoint_state.completed_chunks = sorted(completed_chunks)
-                        save_checkpoint(checkpoint_dir, checkpoint_state)
-                        print(f"CHECKPOINT:SAVED:{idx}", flush=True)
-
-                    processed_count += 1
-                    print(f"TIMING:{idx}:{int(elapsed*1000)}", flush=True)
-
-                    now = time.time()
-                    if now - last_heartbeat >= 5:
-                        print(f"HEARTBEAT:{int(now*1000)}", flush=True)
-                        last_heartbeat = now
-
-                    if progress and task_id is not None:
-                        progress.update(task_id, advance=1)
-                    print(f"PROGRESS:{processed_count}/{total_chunks} chunks", flush=True)
-
-        if progress:
-            with progress:
-                run_inference()
-        else:
-            run_inference()
-
-        # Phase: Concatenating (kept for CLI protocol compatibility)
-        print("PHASE:CONCATENATING", flush=True)
-        print("Concatenating audio segments...", flush=True)
-
-        total_samples = cumulative_samples
-
-        # Build chapter info for M4B
-        chapter_infos: List[ChapterInfo] = []
-        if args.format == "m4b" and chapter_start_indices:
-            for i, (chunk_idx, title) in enumerate(chapter_start_indices):
-                start_sample = chunk_sample_offsets[chunk_idx] if chunk_idx < len(chunk_sample_offsets) else 0
-
-                if i + 1 < len(chapter_start_indices):
-                    next_chunk_idx = chapter_start_indices[i + 1][0]
-                    end_sample = chunk_sample_offsets[next_chunk_idx] if next_chunk_idx < len(chunk_sample_offsets) else total_samples
+        if use_checkpoint and args.resume:
+            # Verify settings that change either generated waveform or exported output.
+            config_for_verify = {
+                "voice": args.voice,
+                "speed": args.speed,
+                "lang_code": args.lang_code,
+                "backend": resolved_backend,
+                "chunk_chars": chunk_chars,
+                "split_pattern": args.split_pattern,
+                "format": args.format,
+                "bitrate": args.bitrate,
+                "normalize": args.normalize,
+            }
+            if verify_checkpoint(checkpoint_dir, args.input, config_for_verify):
+                state = load_checkpoint(checkpoint_dir)
+                if state and state.total_chunks == total_chunks:
+                    completed_chunks = set(state.completed_chunks)
+                    checkpoint_state = state
+                    events.emit("checkpoint", code="RESUMING", detail=len(completed_chunks))
                 else:
-                    end_sample = total_samples
+                    events.emit("checkpoint", code="INVALID", detail="chunk_mismatch")
+            else:
+                events.emit("checkpoint", code="INVALID", detail="config_mismatch")
 
-                chapter_title = title if title else f"Chapter {i + 1}"
-                chapter_infos.append(ChapterInfo(
-                    title=chapter_title,
-                    start_sample=start_sample,
-                    end_sample=end_sample
-                ))
+        backend: Optional[TTSBackend] = None
+        spool_path: Optional[str] = None
+        mp3_export_proc: Optional[subprocess.Popen] = None
+        should_cleanup_checkpoint = False
+        sample_rate = DEFAULT_SAMPLE_RATE
 
-        output_dir = os.path.dirname(os.path.abspath(args.output))
-        if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir, exist_ok=True)
-
-        # Phase: Exporting
-        print("PHASE:EXPORTING", flush=True)
-        if args.format == "m4b":
-            export_pcm_file_to_m4b(
-                spool_path,
-                args.output,
-                metadata=book_metadata,
-                chapters=chapter_infos,
-                sample_rate=sample_rate,
-                bitrate=args.bitrate,
-                normalize=args.normalize,
-            )
-        else:
-            export_pcm_file_to_mp3(
-                spool_path,
-                args.output,
-                sample_rate=sample_rate,
-                bitrate=args.bitrate,
-                normalize=args.normalize,
-            )
-
-        avg_time = sum(times) / max(len(times), 1)
-        should_cleanup_checkpoint = use_checkpoint
-
-        if should_cleanup_checkpoint:
-            cleanup_checkpoint(checkpoint_dir)
-            print("CHECKPOINT:CLEANED", flush=True)
-
-        print("\nDone.")
-        print(f"Output: {args.output}")
-        print(f"Chunks: {total_chunks}")
-        print(f"Average chunk time: {avg_time:.2f}s")
-    finally:
-        if backend is not None:
-            backend.cleanup()
-        if spool_path and os.path.exists(spool_path):
+        try:
+            # Initialize the TTS backend
             try:
-                os.remove(spool_path)
-            except OSError:
-                pass
+                backend = create_backend(resolved_backend)
+                backend.initialize(lang_code=args.lang_code)
+                sample_rate = backend.sample_rate
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"Failed to initialize '{resolved_backend}' backend: {exc}"
+                ) from exc
+
+            output_dir = os.path.dirname(os.path.abspath(args.output))
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+
+            # MP3 mode streams directly to ffmpeg to avoid a second disk read pass.
+            # Keep checkpoint-enabled runs on spool mode so a failed export can still resume.
+            use_mp3_stream = args.format == "mp3" and not use_checkpoint
+            if use_mp3_stream:
+                mp3_export_proc = open_mp3_export_stream(
+                    args.output,
+                    sample_rate=sample_rate,
+                    bitrate=args.bitrate,
+                    normalize=args.normalize,
+                )
+            else:
+                spool_file = tempfile.NamedTemporaryFile(suffix=".pcm", delete=False)
+                spool_path = spool_file.name
+                spool_file.close()
+
+            chunk_sample_offsets: List[int] = [0] * total_chunks
+            cumulative_samples = 0
+
+            # Create initial checkpoint state if checkpointing is enabled
+            if use_checkpoint:
+                if checkpoint_state is None:
+                    epub_hash = compute_epub_hash(args.input)
+                    checkpoint_config = {
+                        "voice": args.voice,
+                        "speed": args.speed,
+                        "lang_code": args.lang_code,
+                        "backend": resolved_backend,
+                        "chunk_chars": chunk_chars,
+                        "split_pattern": args.split_pattern,
+                        "format": args.format,
+                        "bitrate": args.bitrate,
+                        "normalize": args.normalize,
+                    }
+                    checkpoint_state = CheckpointState(
+                        epub_hash=epub_hash,
+                        config=checkpoint_config,
+                        total_chunks=total_chunks,
+                        completed_chunks=sorted(completed_chunks),
+                        chapter_start_indices=chapter_start_indices,
+                    )
+                else:
+                    checkpoint_state.completed_chunks = sorted(completed_chunks)
+                save_checkpoint(checkpoint_dir, checkpoint_state)
+
+            progress = None
+            task_id = None
+            if not args.no_rich:
+                progress = Progress(
+                    TextColumn("[bold]Generating[/bold]"),
+                    BarColumn(),
+                    TextColumn("{task.completed}/{task.total} chunks"),
+                    TimeElapsedColumn(),
+                    TimeRemainingColumn(),
+                )
+                task_id = progress.add_task("tts", total=total_chunks, completed=0)
+
+            times: List[float] = []
+            last_heartbeat = time.time()
+
+            mode_description = "streaming MP3 export" if use_mp3_stream else "disk spooling"
+            events.info(
+                f"Processing {total_chunks} chunks with {backend.name} backend "
+                f"(sequential inference + {mode_description})"
+            )
+
+            # Phase: Inference
+            events.emit("phase", phase="INFERENCE")
+
+            def run_inference() -> None:
+                nonlocal last_heartbeat, cumulative_samples, checkpoint_state
+                processed_count = 0
+
+                spool_context = (
+                    open(spool_path, "wb")
+                    if spool_path is not None
+                    else nullcontext(None)
+                )
+                with spool_context as spool:
+                    for idx, chunk in enumerate(chunks):
+                        chunk_sample_offsets[idx] = cumulative_samples
+                        reused_checkpoint_audio = False
+
+                        if use_checkpoint and args.resume and idx in completed_chunks:
+                            chunk_audio = load_chunk_audio(checkpoint_dir, idx)
+                            if chunk_audio is not None:
+                                if chunk_audio.dtype != np.int16:
+                                    chunk_audio = audio_to_int16(chunk_audio)
+
+                                if use_mp3_stream:
+                                    if mp3_export_proc is None or mp3_export_proc.stdin is None:
+                                        raise RuntimeError("MP3 export process is not writable.")
+                                    mp3_export_proc.stdin.write(chunk_audio.tobytes())
+                                else:
+                                    if spool is None:
+                                        raise RuntimeError("Spool writer is not available.")
+                                    spool.write(chunk_audio.tobytes())
+
+                                cumulative_samples += len(chunk_audio)
+                                reused_checkpoint_audio = True
+                                events.emit(
+                                    "worker",
+                                    id=0,
+                                    status="ENCODE",
+                                    details=f"Reused checkpoint chunk {idx+1}/{total_chunks}",
+                                )
+                                events.emit(
+                                    "checkpoint",
+                                    code="REUSED",
+                                    detail=idx,
+                                )
+                            else:
+                                completed_chunks.discard(idx)
+                                if checkpoint_state is not None:
+                                    checkpoint_state.completed_chunks = sorted(completed_chunks)
+                                    save_checkpoint(checkpoint_dir, checkpoint_state)
+                                events.emit(
+                                    "checkpoint",
+                                    code="MISSING_AUDIO",
+                                    detail=idx,
+                                )
+
+                        if not reused_checkpoint_audio:
+                            start = time.perf_counter()
+                            events.emit(
+                                "worker",
+                                id=0,
+                                status="INFER",
+                                details=f"Chunk {idx+1}/{total_chunks}",
+                            )
+
+                            chunk_tmp_path: Optional[str] = None
+                            chunk_tmp_fp: Optional[BinaryIO] = None
+                            try:
+                                if use_checkpoint:
+                                    chunk_tmp = tempfile.NamedTemporaryFile(
+                                        suffix=".chunk.pcm",
+                                        delete=False,
+                                    )
+                                    chunk_tmp_path = chunk_tmp.name
+                                    chunk_tmp_fp = chunk_tmp
+
+                                for audio in backend.generate(
+                                    text=chunk.text,
+                                    voice=args.voice,
+                                    speed=args.speed,
+                                    split_pattern=args.split_pattern,
+                                ):
+                                    int16_audio = audio_to_int16(audio)
+                                    if use_mp3_stream:
+                                        if mp3_export_proc is None or mp3_export_proc.stdin is None:
+                                            raise RuntimeError("MP3 export process is not writable.")
+                                        mp3_export_proc.stdin.write(int16_audio.tobytes())
+                                    else:
+                                        if spool is None:
+                                            raise RuntimeError("Spool writer is not available.")
+                                        spool.write(int16_audio.tobytes())
+                                    cumulative_samples += len(int16_audio)
+
+                                    if chunk_tmp_fp is not None:
+                                        chunk_tmp_fp.write(int16_audio.tobytes())
+
+                                elapsed = time.perf_counter() - start
+                                times.append(elapsed)
+
+                                if use_checkpoint:
+                                    if chunk_tmp_fp is not None:
+                                        chunk_tmp_fp.close()
+                                        chunk_tmp_fp = None
+
+                                    if chunk_tmp_path and os.path.exists(chunk_tmp_path) and os.path.getsize(chunk_tmp_path) > 0:
+                                        chunk_audio = np.fromfile(chunk_tmp_path, dtype=np.int16)
+                                    else:
+                                        chunk_audio = np.array([], dtype=np.int16)
+
+                                    save_chunk_audio(checkpoint_dir, idx, chunk_audio)
+                                    completed_chunks.add(idx)
+                                    if checkpoint_state is not None:
+                                        checkpoint_state.completed_chunks = sorted(completed_chunks)
+                                        save_checkpoint(checkpoint_dir, checkpoint_state)
+                                    events.emit("checkpoint", code="SAVED", detail=idx)
+
+                                events.emit("timing", chunk_idx=idx, chunk_timing_ms=int(elapsed * 1000))
+                            finally:
+                                if chunk_tmp_fp is not None:
+                                    chunk_tmp_fp.close()
+                                if chunk_tmp_path and os.path.exists(chunk_tmp_path):
+                                    try:
+                                        os.remove(chunk_tmp_path)
+                                    except OSError:
+                                        pass
+
+                        processed_count += 1
+
+                        now = time.time()
+                        if now - last_heartbeat >= 5:
+                            heartbeat_ts = int(now * 1000)
+                            events.emit("heartbeat", heartbeat_ts=heartbeat_ts)
+                            last_heartbeat = now
+
+                        if progress and task_id is not None:
+                            progress.update(task_id, advance=1)
+                        events.emit(
+                            "progress",
+                            current_chunk=processed_count,
+                            total_chunks=total_chunks,
+                        )
+
+            if progress:
+                with progress:
+                    run_inference()
+            else:
+                run_inference()
+
+            # Phase: Concatenating (kept for CLI protocol compatibility)
+            events.emit("phase", phase="CONCATENATING")
+            events.info("Concatenating audio segments...")
+
+            total_samples = cumulative_samples
+
+            # Build chapter info for M4B
+            chapter_infos: List[ChapterInfo] = []
+            if args.format == "m4b" and chapter_start_indices:
+                for i, (chunk_idx, title) in enumerate(chapter_start_indices):
+                    start_sample = (
+                        chunk_sample_offsets[chunk_idx]
+                        if chunk_idx < len(chunk_sample_offsets)
+                        else 0
+                    )
+
+                    if i + 1 < len(chapter_start_indices):
+                        next_chunk_idx = chapter_start_indices[i + 1][0]
+                        end_sample = (
+                            chunk_sample_offsets[next_chunk_idx]
+                            if next_chunk_idx < len(chunk_sample_offsets)
+                            else total_samples
+                        )
+                    else:
+                        end_sample = total_samples
+
+                    chapter_title = title if title else f"Chapter {i + 1}"
+                    chapter_infos.append(
+                        ChapterInfo(
+                            title=chapter_title,
+                            start_sample=start_sample,
+                            end_sample=end_sample,
+                        )
+                    )
+
+            # Phase: Exporting
+            events.emit("phase", phase="EXPORTING")
+            if args.format == "m4b":
+                if spool_path is None:
+                    raise RuntimeError("M4B export requires a spool path.")
+                export_pcm_file_to_m4b(
+                    spool_path,
+                    args.output,
+                    metadata=book_metadata,
+                    chapters=chapter_infos,
+                    sample_rate=sample_rate,
+                    bitrate=args.bitrate,
+                    normalize=args.normalize,
+                )
+            else:
+                if use_mp3_stream:
+                    if mp3_export_proc is None:
+                        raise RuntimeError("MP3 export process was not initialized.")
+                    close_mp3_export_stream(mp3_export_proc)
+                    mp3_export_proc = None
+                else:
+                    if spool_path is None:
+                        raise RuntimeError("MP3 export requires a spool path.")
+                    export_pcm_file_to_mp3(
+                        spool_path,
+                        args.output,
+                        sample_rate=sample_rate,
+                        bitrate=args.bitrate,
+                        normalize=args.normalize,
+                    )
+
+            avg_time = sum(times) / max(len(times), 1)
+            should_cleanup_checkpoint = use_checkpoint
+
+            if should_cleanup_checkpoint:
+                cleanup_checkpoint(checkpoint_dir)
+                events.emit("checkpoint", code="CLEANED")
+
+            events.emit("done", output=args.output, chunks=total_chunks)
+            events.info("Done.")
+            events.info(f"Output: {args.output}")
+            events.info(f"Chunks: {total_chunks}")
+            events.info(f"Average chunk time: {avg_time:.2f}s")
+        finally:
+            if backend is not None:
+                backend.cleanup()
+            if mp3_export_proc is not None and mp3_export_proc.poll() is None:
+                try:
+                    if mp3_export_proc.stdin is not None:
+                        mp3_export_proc.stdin.close()
+                except OSError:
+                    pass
+                try:
+                    mp3_export_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    mp3_export_proc.kill()
+            if spool_path and os.path.exists(spool_path):
+                try:
+                    os.remove(spool_path)
+                except OSError:
+                    pass
+    except Exception as exc:
+        events.error(str(exc))
+        raise
+    finally:
+        events.close()
 
 
 if __name__ == "__main__":

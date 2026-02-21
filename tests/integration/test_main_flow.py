@@ -144,15 +144,15 @@ class TestChunkingEdgeCases:
     """Test edge cases in text chunking."""
 
     def test_very_long_paragraph(self):
-        """Very long paragraph should be kept as single chunk."""
+        """Very long paragraph should be split to respect chunk size."""
         long_text = "A" * 5000
         chapters = [("Ch1", long_text)]
 
         chunks, chapter_starts = split_text_to_chunks(chapters, chunk_chars=1000)
 
-        # Single paragraph kept whole
-        assert len(chunks) == 1
-        assert len(chunks[0].text) == 5000
+        assert len(chunks) == 5
+        assert all(len(chunk.text) <= 1000 for chunk in chunks)
+        assert "".join(chunk.text for chunk in chunks) == long_text
 
     def test_many_small_paragraphs(self):
         """Many small paragraphs should be combined."""
@@ -181,6 +181,5 @@ class TestChunkingEdgeCases:
 
         chunks, chapter_starts = split_text_to_chunks(chapters, chunk_chars=500)
 
-        # Long paragraph should be its own chunk
-        long_chunk = [c for c in chunks if len(c.text) > 1000]
-        assert len(long_chunk) >= 1
+        # No chunk should exceed the configured chunk size.
+        assert all(len(chunk.text) <= 500 for chunk in chunks)

@@ -74,14 +74,14 @@ class TestSplitTextToChunks:
             assert len(chunk.text) > 0
 
     def test_long_paragraph(self):
-        """Long paragraphs should be kept whole even if exceeding limit."""
+        """Long paragraphs should be split to respect chunk_chars."""
         long_paragraph = "A" * 2000  # 2000 character paragraph
         chapters = [("Chapter 1", long_paragraph)]
         chunks, chapter_starts = split_text_to_chunks(chapters, chunk_chars=1000)
 
-        # Long paragraph should be kept as single chunk
-        assert len(chunks) == 1
-        assert len(chunks[0].text) == 2000
+        assert len(chunks) == 2
+        assert all(len(chunk.text) <= 1000 for chunk in chunks)
+        assert "".join(chunk.text for chunk in chunks) == long_paragraph
 
     def test_empty_input(self):
         """Empty input should return empty chunks and chapter_starts."""

@@ -22,57 +22,59 @@ const EMA_ALPHA = 0.3;
 // Parse Python errors into user-friendly messages
 function parseErrorMessage(error: string): string {
     const errorLower = error.toLowerCase();
+    const logPathMatch = error.match(/log file:\s*(.+)$/im);
+    const logSuffix = logPathMatch ? ` (log: ${logPathMatch[1].trim()})` : '';
 
     // GPU/Memory errors
     if (errorLower.includes('out of memory') || errorLower.includes('mps') && errorLower.includes('memory')) {
-        return 'GPU memory exhausted - try reducing chunk size (--chunk_chars)';
+        return `GPU memory exhausted - try reducing chunk size (--chunk_chars)${logSuffix}`;
     }
     if (errorLower.includes('mps backend') || errorLower.includes('metal')) {
-        return 'GPU acceleration error - try disabling MPS or updating macOS';
+        return `GPU acceleration error - try disabling MPS or updating macOS${logSuffix}`;
     }
 
     // File errors
     if (errorLower.includes('no such file') || errorLower.includes('not found') || errorLower.includes('filenotfounderror')) {
-        return 'Input file not found or inaccessible';
+        return `Input file not found or inaccessible${logSuffix}`;
     }
     if (errorLower.includes('permission denied')) {
-        return 'Permission denied - check file/folder permissions';
+        return `Permission denied - check file/folder permissions${logSuffix}`;
     }
     if (
         errorLower.includes('no space left on device') ||
         errorLower.includes('disk full') ||
         errorLower.includes('errno 28')
     ) {
-        return 'Disk is full - free up space and try again';
+        return `Disk is full - free up space and try again${logSuffix}`;
     }
     if (errorLower.includes('no readable text') || errorLower.includes('no text chunks')) {
-        return 'EPUB has no readable text content';
+        return `EPUB has no readable text content${logSuffix}`;
     }
 
     // Encoding/Format errors
     if (errorLower.includes('codec') || errorLower.includes('decode') || errorLower.includes('encode')) {
-        return 'Text encoding error - EPUB may contain unsupported characters';
+        return `Text encoding error - EPUB may contain unsupported characters${logSuffix}`;
     }
     if (errorLower.includes('epub') && errorLower.includes('invalid')) {
-        return 'Invalid EPUB format - file may be corrupted';
+        return `Invalid EPUB format - file may be corrupted${logSuffix}`;
     }
 
     // FFmpeg errors
     if (errorLower.includes('ffmpeg') || errorLower.includes('ffprobe')) {
-        return 'FFmpeg not found - please install FFmpeg for MP3 export';
+        return `FFmpeg not found - please install FFmpeg for MP3 export${logSuffix}`;
     }
 
     // Python version errors
     if (errorLower.includes('python') && errorLower.includes('version')) {
-        return 'Python version error - Kokoro requires Python 3.10-3.12';
+        return `Python version error - Kokoro requires Python 3.10-3.12${logSuffix}`;
     }
 
     // Model/TTS errors
     if (errorLower.includes('voice') && (errorLower.includes('not found') || errorLower.includes('invalid'))) {
-        return 'Invalid voice - check available voice options';
+        return `Invalid voice - check available voice options${logSuffix}`;
     }
     if (errorLower.includes('model') && errorLower.includes('load')) {
-        return 'Failed to load TTS model - check installation';
+        return `Failed to load TTS model - check installation${logSuffix}`;
     }
 
     // Return truncated original error if no pattern matches
@@ -81,11 +83,13 @@ function parseErrorMessage(error: string): string {
     for (let i = lines.length - 1; i >= 0; i--) {
         const line = lines[i].trim();
         if (line && !line.startsWith('Traceback') && !line.startsWith('File ')) {
-            return line.length > 100 ? line.substring(0, 100) + '...' : line;
+            const truncated = line.length > 100 ? line.substring(0, 100) + '...' : line;
+            return `${truncated}${logSuffix}`;
         }
     }
 
-    return error.length > 100 ? error.substring(0, 100) + '...' : error;
+    const fallback = error.length > 100 ? error.substring(0, 100) + '...' : error;
+    return `${fallback}${logSuffix}`;
 }
 
 interface BatchProgressProps {
@@ -174,7 +178,6 @@ function FileStatus({ file, isActive }: { file: FileJob; isActive?: boolean }) {
         switch (file.status) {
             case 'pending':
                 return <Text color="gray" dimColor>⏳</Text>;
-            case 'processing':
             case 'processing':
                 return <Text color="cyan">►</Text>;
             case 'done':

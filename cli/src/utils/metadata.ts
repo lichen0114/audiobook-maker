@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import * as path from 'path';
+import { getNullDevice, resolvePythonRuntime } from './python-runtime.js';
 
 export interface ExtractedMetadata {
     title: string;
@@ -12,19 +12,16 @@ export interface ExtractedMetadata {
  */
 export function extractMetadata(epubPath: string): Promise<ExtractedMetadata> {
     return new Promise((resolve, reject) => {
-        // Get the project root (parent of cli directory)
-        const projectRoot = path.resolve(import.meta.dirname, '../../..');
-        const pythonScript = path.join(projectRoot, 'app.py');
-        const venvPython = path.join(projectRoot, '.venv', 'bin', 'python');
+        const { projectRoot, appPath: pythonScript, pythonPath } = resolvePythonRuntime();
 
         const args = [
             pythonScript,
             '--input', epubPath,
-            '--output', '/dev/null', // Not used in extract mode
+            '--output', getNullDevice(), // Not used in extract mode
             '--extract_metadata',
         ];
 
-        const process = spawn(venvPython, args, {
+        const process = spawn(pythonPath, args, {
             cwd: projectRoot,
             env: {
                 ...globalThis.process.env,

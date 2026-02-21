@@ -401,14 +401,14 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
             {/* Worker Selection */}
             {step === 'workers' && (
                 <Box flexDirection="column">
-                    <Text color="yellow" bold>Select number of parallel workers:</Text>
-                    <Text dimColor>On Apple Silicon, 1-2 workers is optimal (GPU serializes operations)</Text>
+                    <Text color="yellow" bold>Worker compatibility setting:</Text>
+                    <Text dimColor>Current backend runs sequential inference; this setting is reserved for future parallel modes</Text>
                     <Box marginTop={1}>
                         <SelectInput
                             items={[
-                                { label: '1 Worker (Recommended for MPS)', value: '1' },
-                                { label: '2 Workers (Balanced)', value: '2' },
-                                { label: '4 Workers (Max for Apple Silicon)', value: '4' },
+                                { label: '1 Worker (Recommended)', value: '1' },
+                                { label: '2 Workers (Compatibility)', value: '2' },
+                                { label: '4 Workers (Compatibility)', value: '4' },
                             ]}
                             onSelect={handleWorkerSelect}
                             initialIndex={[1, 2, 4].indexOf(selectedWorkers > 4 ? 4 : selectedWorkers || 2)}

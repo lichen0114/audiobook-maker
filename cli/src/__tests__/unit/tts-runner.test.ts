@@ -68,4 +68,20 @@ describe('tts-runner parser', () => {
         const heartbeat = parseOutputLine('HEARTBEAT:1704067200000', state);
         expect(heartbeat?.heartbeatTs).toBe(1704067200000);
     });
+
+    it('parses structured JSON events', () => {
+        const state = createParserState();
+
+        const phase = parseOutputLine('{"type":"phase","phase":"PARSING"}', state);
+        expect(phase?.phase).toBe('PARSING');
+
+        const metadata = parseOutputLine('{"type":"metadata","key":"backend_resolved","value":"mock"}', state);
+        expect(metadata?.backendResolved).toBe('mock');
+
+        const progress = parseOutputLine('{"type":"progress","current_chunk":4,"total_chunks":10}', state);
+        expect(progress?.progress).toBe(40);
+
+        const timing = parseOutputLine('{"type":"timing","chunk_timing_ms":321}', state);
+        expect(timing?.chunkTimingMs).toBe(321);
+    });
 });

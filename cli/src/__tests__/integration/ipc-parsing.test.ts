@@ -90,4 +90,35 @@ PHASE:EXPORTING`;
         expect(updates[2].phase).toBe('INFERENCE');
         expect(updates[3].currentChunk).toBe(1);
     });
+
+    it('parses JSON IPC flow emitted by backend --event_format json', () => {
+        const output = `{"type":"phase","phase":"PARSING"}
+{"type":"metadata","key":"backend_resolved","value":"mock"}
+{"type":"metadata","key":"total_chars","value":3000}
+{"type":"phase","phase":"INFERENCE"}
+{"type":"worker","id":0,"status":"INFER","details":"Chunk 1/3"}
+{"type":"timing","chunk_timing_ms":456}
+{"type":"progress","current_chunk":1,"total_chunks":3}
+{"type":"heartbeat","heartbeat_ts":1704067200000}
+{"type":"phase","phase":"EXPORTING"}`;
+
+        const state = createParserState();
+        const updates: ProgressInfo[] = [];
+
+        for (const line of output.split('\n')) {
+            const parsed = parseOutputLine(line, state);
+            if (parsed) {
+                updates.push(parsed);
+            }
+        }
+
+        expect(updates.some((u) => u.phase === 'PARSING')).toBe(true);
+        expect(updates.some((u) => u.phase === 'INFERENCE')).toBe(true);
+        expect(updates.some((u) => u.phase === 'EXPORTING')).toBe(true);
+        expect(updates.some((u) => u.backendResolved === 'mock')).toBe(true);
+        expect(updates.some((u) => u.totalChars === 3000)).toBe(true);
+        expect(updates.some((u) => u.chunkTimingMs === 456)).toBe(true);
+        expect(updates.some((u) => u.heartbeatTs === 1704067200000)).toBe(true);
+        expect(updates.some((u) => u.currentChunk === 1 && u.totalChunks === 3)).toBe(true);
+    });
 });

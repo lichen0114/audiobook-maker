@@ -119,9 +119,19 @@ def verify_checkpoint(checkpoint_dir: str, epub_path: str, config: Dict[str, Any
     if state.epub_hash != current_hash:
         return False
 
-    # Verify key config options match
-    # Only check options that affect audio output
-    key_options = ['voice', 'speed', 'lang_code', 'backend', 'chunk_chars']
+    # Verify key config options match.
+    # Include text splitting and export options to avoid resuming incompatible jobs.
+    key_options = [
+        'voice',
+        'speed',
+        'lang_code',
+        'backend',
+        'chunk_chars',
+        'split_pattern',
+        'format',
+        'bitrate',
+        'normalize',
+    ]
     for key in key_options:
         if state.config.get(key) != config.get(key):
             return False

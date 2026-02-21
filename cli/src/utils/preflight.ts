@@ -1,6 +1,11 @@
 import { execSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
-import * as path from 'path';
+import {
+    getAppPath,
+    getPreferredVenvPython,
+    getProjectRoot,
+    resolvePythonPath,
+} from './python-runtime.js';
 
 export interface PreflightCheck {
     name: string;
@@ -12,13 +17,6 @@ export interface PreflightCheck {
 export interface PreflightResult {
     passed: boolean;
     checks: PreflightCheck[];
-}
-
-/**
- * Get the project root directory (parent of cli/)
- */
-function getProjectRoot(): string {
-    return path.resolve(import.meta.dirname, '../../..');
 }
 
 /**
@@ -47,7 +45,7 @@ function checkFFmpeg(): PreflightCheck {
  */
 function checkPythonVenv(): PreflightCheck {
     const projectRoot = getProjectRoot();
-    const venvPython = path.join(projectRoot, '.venv', 'bin', 'python');
+    const venvPython = getPreferredVenvPython(projectRoot);
 
     if (!fs.existsSync(venvPython)) {
         return {
@@ -102,7 +100,7 @@ function checkPythonVenv(): PreflightCheck {
  */
 function checkPythonDeps(): PreflightCheck {
     const projectRoot = getProjectRoot();
-    const venvPython = path.join(projectRoot, '.venv', 'bin', 'python');
+    const venvPython = getPreferredVenvPython(projectRoot);
 
     if (!fs.existsSync(venvPython)) {
         return {
@@ -149,7 +147,7 @@ function checkPythonDeps(): PreflightCheck {
  */
 function checkAppScript(): PreflightCheck {
     const projectRoot = getProjectRoot();
-    const appPath = path.join(projectRoot, 'app.py');
+    const appPath = getAppPath(projectRoot);
 
     if (!fs.existsSync(appPath)) {
         return {
@@ -173,7 +171,7 @@ function checkAppScript(): PreflightCheck {
  */
 export function checkMLXDeps(): PreflightCheck {
     const projectRoot = getProjectRoot();
-    const venvPython = path.join(projectRoot, '.venv', 'bin', 'python');
+    const venvPython = getPreferredVenvPython(projectRoot);
 
     if (!fs.existsSync(venvPython)) {
         return {
@@ -238,12 +236,12 @@ export function runPreflightChecks(): PreflightResult {
  */
 export function quickCheck(): boolean {
     const projectRoot = getProjectRoot();
-    const venvPython = path.join(projectRoot, '.venv', 'bin', 'python');
-    const appPath = path.join(projectRoot, 'app.py');
+    const venvPython = getPreferredVenvPython(projectRoot);
+    const appPath = getAppPath(projectRoot);
 
     // Check FFmpeg
     try {
-        execSync('which ffmpeg', { stdio: 'pipe' });
+        execSync('ffmpeg -version', { stdio: 'pipe' });
     } catch {
         return false;
     }
@@ -255,6 +253,12 @@ export function quickCheck(): boolean {
 
     // Check app.py exists
     if (!fs.existsSync(appPath)) {
+        return false;
+    }
+
+    try {
+        resolvePythonPath(projectRoot);
+    } catch {
         return false;
     }
 

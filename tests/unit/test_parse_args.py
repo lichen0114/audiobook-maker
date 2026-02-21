@@ -38,6 +38,8 @@ class TestParseArgs:
             assert args.no_rich is False
             assert args.backend == "auto"
             assert args.checkpoint is False
+            assert args.event_format == "text"
+            assert args.log_file is None
 
     def test_custom_voice(self):
         """Should accept custom voice."""
@@ -120,6 +122,17 @@ class TestParseArgs:
             args = parse_args()
             assert args.split_pattern == r"\.\s+"
 
+    def test_event_format_and_log_file(self):
+        """Should accept structured IPC format and backend log file path."""
+        with patch("sys.argv", [
+            "app.py", "--input", "test.epub", "--output", "test.mp3",
+            "--event_format", "json",
+            "--log_file", "/tmp/backend.log",
+        ]):
+            args = parse_args()
+            assert args.event_format == "json"
+            assert args.log_file == "/tmp/backend.log"
+
     def test_missing_required_args(self):
         """Should fail when required args missing."""
         with patch("sys.argv", ["app.py"]):
@@ -152,6 +165,8 @@ class TestParseArgs:
             "--workers", "3",
             "--backend", "auto",
             "--checkpoint",
+            "--event_format", "json",
+            "--log_file", "/tmp/run.log",
             "--no_rich",
         ]):
             args = parse_args()
@@ -166,4 +181,6 @@ class TestParseArgs:
             assert args.workers == 3
             assert args.backend == "auto"
             assert args.checkpoint is True
+            assert args.event_format == "json"
+            assert args.log_file == "/tmp/run.log"
             assert args.no_rich is True

@@ -56,7 +56,56 @@ def test_verify_checkpoint_rejects_chunk_chars_mismatch(temp_dir):
 
 
 @pytest.mark.unit
-def test_resume_rebuilds_spool_from_chunk_files(temp_dir):
+def test_verify_checkpoint_rejects_split_pattern_mismatch(temp_dir):
+    epub_path = f"{temp_dir}/book.epub"
+    checkpoint_dir = f"{temp_dir}/book.mp3.checkpoint"
+
+    with open(epub_path, "wb") as f:
+        f.write(b"dummy-epub")
+
+    state = CheckpointState(
+        epub_hash="",
+        config={
+            "voice": "af_heart",
+            "speed": 1.0,
+            "lang_code": "a",
+            "backend": "pytorch",
+            "chunk_chars": 600,
+            "split_pattern": r"\n+",
+            "format": "mp3",
+            "bitrate": "192k",
+            "normalize": False,
+        },
+        total_chunks=10,
+        completed_chunks=[0, 1],
+        chapter_start_indices=[(0, "Chapter 1")],
+    )
+
+    from checkpoint import compute_epub_hash
+
+    state.epub_hash = compute_epub_hash(epub_path)
+    save_checkpoint(checkpoint_dir, state)
+
+    ok = verify_checkpoint(
+        checkpoint_dir,
+        epub_path,
+        {
+            "voice": "af_heart",
+            "speed": 1.0,
+            "lang_code": "a",
+            "backend": "pytorch",
+            "chunk_chars": 600,
+            "split_pattern": r"\.\s+",
+            "format": "mp3",
+            "bitrate": "192k",
+            "normalize": False,
+        },
+    )
+    assert ok is False
+
+
+@pytest.mark.unit
+def test_resume_reuses_saved_chunk_audio_in_order(temp_dir):
     epub_path = f"{temp_dir}/book.epub"
     output_path = f"{temp_dir}/book.mp3"
 

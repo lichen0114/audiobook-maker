@@ -1,6 +1,9 @@
 import { spawn, spawnSync } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import type { TTSConfig } from '../App.js';
+import { resolvePythonRuntime } from './python-runtime.js';
 
 export interface WorkerStatus {
     id: number;
@@ -34,6 +37,20 @@ export interface ParserState {
     lastBackendResolved?: ResolvedBackend;
 }
 
+interface JsonEvent {
+    type: string;
+    phase?: string;
+    key?: string;
+    value?: string | number | boolean;
+    chunk_timing_ms?: number;
+    heartbeat_ts?: number;
+    id?: number;
+    status?: string;
+    details?: string;
+    current_chunk?: number;
+    total_chunks?: number;
+}
+
 const PROCESSING_PHASES: ProcessingPhase[] = [
     'PARSING',
     'INFERENCE',
@@ -58,6 +75,121 @@ export function parseOutputLine(line: string, state: ParserState): ProgressInfo 
     const trimmed = line.trim();
     if (!trimmed) {
         return null;
+    }
+
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        try {
+            const event = JSON.parse(trimmed) as JsonEvent;
+
+            if (event.type === 'phase' && typeof event.phase === 'string' && isProcessingPhase(event.phase)) {
+                state.lastPhase = event.phase;
+                return {
+                    progress: state.lastProgress,
+                    currentChunk: state.lastCurrentChunk,
+                    totalChunks: state.lastTotal,
+                    phase: event.phase,
+                    totalChars: state.lastTotalChars,
+                    chapterCount: state.lastChapterCount,
+                    backendResolved: state.lastBackendResolved,
+                };
+            }
+
+            if (event.type === 'metadata' && typeof event.key === 'string') {
+                if (
+                    event.key === 'backend_resolved'
+                    && (event.value === 'pytorch' || event.value === 'mlx' || event.value === 'mock')
+                ) {
+                    state.lastBackendResolved = event.value;
+                } else if (event.key === 'total_chars' && typeof event.value === 'number') {
+                    state.lastTotalChars = event.value;
+                } else if (event.key === 'chapter_count' && typeof event.value === 'number') {
+                    state.lastChapterCount = event.value;
+                } else {
+                    return null;
+                }
+
+                return {
+                    progress: state.lastProgress,
+                    currentChunk: state.lastCurrentChunk,
+                    totalChunks: state.lastTotal,
+                    phase: state.lastPhase,
+                    totalChars: state.lastTotalChars,
+                    chapterCount: state.lastChapterCount,
+                    backendResolved: state.lastBackendResolved,
+                };
+            }
+
+            if (event.type === 'timing' && typeof event.chunk_timing_ms === 'number') {
+                return {
+                    progress: state.lastProgress,
+                    currentChunk: state.lastCurrentChunk,
+                    totalChunks: state.lastTotal,
+                    phase: state.lastPhase,
+                    chunkTimingMs: event.chunk_timing_ms,
+                    totalChars: state.lastTotalChars,
+                    chapterCount: state.lastChapterCount,
+                    backendResolved: state.lastBackendResolved,
+                };
+            }
+
+            if (event.type === 'heartbeat' && typeof event.heartbeat_ts === 'number') {
+                return {
+                    progress: state.lastProgress,
+                    currentChunk: state.lastCurrentChunk,
+                    totalChunks: state.lastTotal,
+                    phase: state.lastPhase,
+                    heartbeatTs: event.heartbeat_ts,
+                    totalChars: state.lastTotalChars,
+                    chapterCount: state.lastChapterCount,
+                    backendResolved: state.lastBackendResolved,
+                };
+            }
+
+            if (
+                event.type === 'worker'
+                && typeof event.id === 'number'
+                && (event.status === 'IDLE' || event.status === 'INFER' || event.status === 'ENCODE')
+            ) {
+                return {
+                    progress: state.lastProgress,
+                    currentChunk: state.lastCurrentChunk,
+                    totalChunks: state.lastTotal,
+                    phase: state.lastPhase,
+                    workerStatus: {
+                        id: event.id,
+                        status: event.status,
+                        details: event.details ?? '',
+                    },
+                    totalChars: state.lastTotalChars,
+                    chapterCount: state.lastChapterCount,
+                    backendResolved: state.lastBackendResolved,
+                };
+            }
+
+            if (
+                event.type === 'progress'
+                && typeof event.current_chunk === 'number'
+                && typeof event.total_chunks === 'number'
+                && event.total_chunks > 0
+            ) {
+                const progress = Math.round((event.current_chunk / event.total_chunks) * 100);
+                state.lastProgress = progress;
+                state.lastCurrentChunk = event.current_chunk;
+                state.lastTotal = event.total_chunks;
+
+                return {
+                    progress,
+                    currentChunk: event.current_chunk,
+                    totalChunks: event.total_chunks,
+                    phase: state.lastPhase,
+                    totalChars: state.lastTotalChars,
+                    chapterCount: state.lastChapterCount,
+                    backendResolved: state.lastBackendResolved,
+                };
+            }
+        } catch {
+            // Fall back to legacy parser below.
+        }
     }
 
     if (trimmed.startsWith('PHASE:')) {
@@ -216,7 +348,7 @@ export function parseOutputLine(line: string, state: ParserState): ProgressInfo 
     return null;
 }
 
-function resolveBackendForEnv(config: TTSConfig, projectRoot: string, venvPython: string): ResolvedBackend {
+function resolveBackendForEnv(config: TTSConfig, projectRoot: string, pythonPath: string): ResolvedBackend {
     if (config.backend === 'pytorch' || config.backend === 'mlx' || config.backend === 'mock') {
         return config.backend;
     }
@@ -227,7 +359,7 @@ function resolveBackendForEnv(config: TTSConfig, projectRoot: string, venvPython
 
     try {
         const probe = spawnSync(
-            venvPython,
+            pythonPath,
             ['-c', 'import mlx.core as mx; mx.array([1.0]); print("mlx")'],
             {
                 cwd: projectRoot,
@@ -246,6 +378,19 @@ function resolveBackendForEnv(config: TTSConfig, projectRoot: string, venvPython
     return 'pytorch';
 }
 
+function getRunLogPath(projectRoot: string): string {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const homeBaseDir = path.join(os.homedir(), '.audiobook-maker', 'logs');
+    try {
+        fs.mkdirSync(homeBaseDir, { recursive: true });
+        return path.join(homeBaseDir, `run-${timestamp}.log`);
+    } catch {
+        const localBaseDir = path.join(projectRoot, '.logs');
+        fs.mkdirSync(localBaseDir, { recursive: true });
+        return path.join(localBaseDir, `run-${timestamp}.log`);
+    }
+}
+
 export function runTTS(
     inputPath: string,
     outputPath: string,
@@ -253,10 +398,10 @@ export function runTTS(
     onProgress: (info: ProgressInfo) => void
 ): Promise<void> {
     return new Promise((resolve, reject) => {
-        const projectRoot = path.resolve(import.meta.dirname, '../../..');
-        const pythonScript = path.join(projectRoot, 'app.py');
-        const venvPython = path.join(projectRoot, '.venv', 'bin', 'python');
-        const backendForEnv = resolveBackendForEnv(config, projectRoot, venvPython);
+        const { projectRoot, appPath: pythonScript, pythonPath } = resolvePythonRuntime();
+        const backendForEnv = resolveBackendForEnv(config, projectRoot, pythonPath);
+        const logFile = getRunLogPath(projectRoot);
+        const verbose = process.env.AUDIOBOOK_VERBOSE === '1' || process.env.AUDIOBOOK_VERBOSE === 'true';
 
         const args = [
             pythonScript,
@@ -277,6 +422,8 @@ export function runTTS(
             ...(config.checkpointEnabled ? ['--checkpoint'] : []),
             ...(config.resume ? ['--resume'] : []),
             ...(config.noCheckpoint ? ['--no_checkpoint'] : []),
+            '--event_format', 'json',
+            '--log_file', logFile,
             '--no_rich',
         ];
 
@@ -288,7 +435,7 @@ export function runTTS(
             OPENBLAS_NUM_THREADS: '2',
         } : {};
 
-        const process = spawn(venvPython, args, {
+        const childProc = spawn(pythonPath, args, {
             cwd: projectRoot,
             env: {
                 ...globalThis.process.env,
@@ -310,16 +457,19 @@ export function runTTS(
             }
         };
 
-        process.stdout.on('data', (data: Buffer) => {
+        childProc.stdout.on('data', (data: Buffer) => {
             stdoutBuffer += data.toString();
             const lines = stdoutBuffer.split('\n');
             stdoutBuffer = lines.pop() || '';
             for (const line of lines) {
+                if (verbose && line.trim()) {
+                    globalThis.process.stderr.write(`[py] ${line}\n`);
+                }
                 emitParsedLine(line);
             }
         });
 
-        process.stderr.on('data', (data: Buffer) => {
+        childProc.stderr.on('data', (data: Buffer) => {
             const chunk = data.toString();
             stderrTail += chunk;
             if (stderrTail.length > MAX_STDERR) {
@@ -330,15 +480,18 @@ export function runTTS(
             const lines = stderrBuffer.split('\n');
             stderrBuffer = lines.pop() || '';
             for (const line of lines) {
+                if (verbose && line.trim()) {
+                    globalThis.process.stderr.write(`[py:err] ${line}\n`);
+                }
                 emitParsedLine(line);
             }
         });
 
-        process.on('error', (err) => {
-            reject(new Error(`Failed to start Python process: ${err.message}`));
+        childProc.on('error', (err) => {
+            reject(new Error(`Failed to start Python process: ${err.message}\nLog file: ${logFile}`));
         });
 
-        process.on('close', (code) => {
+        childProc.on('close', (code) => {
             if (stdoutBuffer.trim()) {
                 emitParsedLine(stdoutBuffer.trim());
             }
@@ -358,7 +511,7 @@ export function runTTS(
                 });
                 resolve();
             } else {
-                reject(new Error(`Python process exited with code ${code}\n${stderrTail}`));
+                reject(new Error(`Python process exited with code ${code}\n${stderrTail}\nLog file: ${logFile}`));
             }
         });
     });

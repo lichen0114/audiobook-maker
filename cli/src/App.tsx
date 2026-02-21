@@ -13,7 +13,7 @@ import { runPreflightChecks, quickCheck, type PreflightCheck } from './utils/pre
 import { extractMetadata } from './utils/metadata.js';
 import { checkCheckpoint, deleteCheckpoint } from './utils/checkpoint.js';
 import { formatBytes, formatDuration } from './utils/format.js';
-import { exec } from 'child_process';
+import { openFolder } from './utils/open-folder.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -133,7 +133,7 @@ export function App() {
             const completedFiles = files.filter(f => f.status === 'done');
             if (completedFiles.length > 0) {
                 const outputDir = path.dirname(completedFiles[0].outputPath);
-                exec(`open "${outputDir}"`);
+                openFolder(outputDir);
             }
         }
         // Start new batch when pressing 'n' on done screen
