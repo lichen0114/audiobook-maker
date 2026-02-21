@@ -66,6 +66,27 @@ def test_mock_backend_mp3_end_to_end(tmp_path: Path):
 
 @pytest.mark.e2e
 @pytest.mark.integration
+def test_mock_backend_mp3_overlap3_end_to_end(tmp_path: Path):
+    output_path = tmp_path / "mock-overlap3.mp3"
+
+    result = run_app([
+        "--input", str(SAMPLE_EPUB),
+        "--output", str(output_path),
+        "--backend", "mock",
+        "--chunk_chars", "120",
+        "--pipeline_mode", "overlap3",
+    ])
+
+    assert result.returncode == 0, result.stderr
+    assert_phase_order(result.stdout)
+
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+    assert "PROGRESS:" in result.stdout
+
+
+@pytest.mark.e2e
+@pytest.mark.integration
 def test_mock_backend_m4b_end_to_end_with_ffprobe(tmp_path: Path):
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         pytest.skip("ffmpeg/ffprobe not available")

@@ -35,6 +35,9 @@ class TestParseArgs:
             assert args.chunk_chars is None
             assert args.split_pattern == r"\n+"
             assert args.workers == 2
+            assert args.pipeline_mode is None
+            assert args.prefetch_chunks == 2
+            assert args.pcm_queue_size == 4
             assert args.no_rich is False
             assert args.backend == "auto"
             assert args.checkpoint is False
@@ -76,6 +79,19 @@ class TestParseArgs:
         ]):
             args = parse_args()
             assert args.workers == 4
+
+    def test_custom_pipeline_mode_and_queue_sizes(self):
+        """Should accept overlap pipeline tuning args."""
+        with patch("sys.argv", [
+            "app.py", "--input", "test.epub", "--output", "test.mp3",
+            "--pipeline_mode", "overlap3",
+            "--prefetch_chunks", "3",
+            "--pcm_queue_size", "6",
+        ]):
+            args = parse_args()
+            assert args.pipeline_mode == "overlap3"
+            assert args.prefetch_chunks == 3
+            assert args.pcm_queue_size == 6
 
     def test_backend_auto(self):
         """Should accept auto backend selection."""
@@ -163,6 +179,9 @@ class TestParseArgs:
             "--chunk_chars", "1500",
             "--split_pattern", r"\n+",
             "--workers", "3",
+            "--pipeline_mode", "sequential",
+            "--prefetch_chunks", "5",
+            "--pcm_queue_size", "7",
             "--backend", "auto",
             "--checkpoint",
             "--event_format", "json",
@@ -179,6 +198,9 @@ class TestParseArgs:
             assert args.chunk_chars == 1500
             assert args.split_pattern == r"\n+"
             assert args.workers == 3
+            assert args.pipeline_mode == "sequential"
+            assert args.prefetch_chunks == 5
+            assert args.pcm_queue_size == 7
             assert args.backend == "auto"
             assert args.checkpoint is True
             assert args.event_format == "json"

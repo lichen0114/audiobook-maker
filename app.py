@@ -4,14 +4,16 @@ import importlib.util
 import json
 import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
-from typing import Any, BinaryIO, Dict, List, Optional, TextIO, Tuple
+from typing import Any, Dict, List, Optional, TextIO, Tuple
 
 import numpy as np
 from bs4 import BeautifulSoup
@@ -51,6 +53,18 @@ DEFAULT_CHUNK_CHARS = {
 }
 
 _AUTO_BACKEND_CACHE: Optional[str] = None
+
+
+def default_pipeline_mode(output_format: str, use_checkpoint: bool) -> str:
+    """Choose pipeline mode based on platform and output path."""
+    if (
+        output_format == "mp3"
+        and not use_checkpoint
+        and sys.platform == "darwin"
+        and platform.machine() == "arm64"
+    ):
+        return "overlap3"
+    return "sequential"
 
 
 class EventEmitter:
@@ -838,6 +852,27 @@ def parse_args() -> argparse.Namespace:
         help="Reserved compatibility flag. Current pipeline is sequential (default: 2).",
     )
     parser.add_argument(
+        "--pipeline_mode",
+        choices=["sequential", "overlap3"],
+        default=None,
+        help=(
+            "Pipeline execution mode. Defaults to overlap3 on Apple Silicon for MP3 "
+            "without checkpoints, otherwise sequential."
+        ),
+    )
+    parser.add_argument(
+        "--prefetch_chunks",
+        type=int,
+        default=2,
+        help="Number of chunks to prefetch for overlap3 mode (default: 2).",
+    )
+    parser.add_argument(
+        "--pcm_queue_size",
+        type=int,
+        default=4,
+        help="PCM queue depth for overlap3 mode (default: 4).",
+    )
+    parser.add_argument(
         "--no_rich",
         action="store_true",
         help="Disable rich progress bar (for CLI integration)",
@@ -938,6 +973,11 @@ def main() -> None:
                 "(checkpointing is opt-in via --checkpoint)."
             )
 
+        if args.prefetch_chunks < 1:
+            raise ValueError("--prefetch_chunks must be >= 1")
+        if args.pcm_queue_size < 1:
+            raise ValueError("--pcm_queue_size must be >= 1")
+
         if args.workers != 1:
             events.warn(
                 f"--workers={args.workers} is currently a compatibility setting. "
@@ -981,6 +1021,18 @@ def main() -> None:
 
         resolved_backend = resolve_backend(args.backend)
         events.emit("metadata", key="backend_resolved", value=resolved_backend)
+
+        requested_pipeline_mode = args.pipeline_mode or default_pipeline_mode(
+            args.format, use_checkpoint
+        )
+        pipeline_mode = requested_pipeline_mode
+        if pipeline_mode == "overlap3" and (args.format != "mp3" or use_checkpoint):
+            events.warn(
+                "--pipeline_mode=overlap3 is currently supported only for MP3 "
+                "without checkpointing; falling back to sequential."
+            )
+            pipeline_mode = "sequential"
+        events.emit("metadata", key="pipeline_mode", value=pipeline_mode)
 
         # Determine chunk size: use user-provided value or backend-optimal default
         chunk_chars = (
@@ -1157,13 +1209,21 @@ def main() -> None:
             mode_description = "streaming MP3 export" if use_mp3_stream else "disk spooling"
             events.info(
                 f"Processing {total_chunks} chunks with {backend.name} backend "
-                f"(sequential inference + {mode_description})"
+                f"({pipeline_mode} pipeline + {mode_description})"
             )
 
             # Phase: Inference
             events.emit("phase", phase="INFERENCE")
 
-            def run_inference() -> None:
+            def emit_heartbeat_if_needed() -> None:
+                nonlocal last_heartbeat
+                now = time.time()
+                if now - last_heartbeat >= 5:
+                    heartbeat_ts = int(now * 1000)
+                    events.emit("heartbeat", heartbeat_ts=heartbeat_ts)
+                    last_heartbeat = now
+
+            def run_inference_sequential() -> None:
                 nonlocal last_heartbeat, cumulative_samples, checkpoint_state
                 processed_count = 0
 
@@ -1225,74 +1285,54 @@ def main() -> None:
                                 details=f"Chunk {idx+1}/{total_chunks}",
                             )
 
-                            chunk_tmp_path: Optional[str] = None
-                            chunk_tmp_fp: Optional[BinaryIO] = None
-                            try:
-                                if use_checkpoint:
-                                    chunk_tmp = tempfile.NamedTemporaryFile(
-                                        suffix=".chunk.pcm",
-                                        delete=False,
-                                    )
-                                    chunk_tmp_path = chunk_tmp.name
-                                    chunk_tmp_fp = chunk_tmp
+                            checkpoint_parts: Optional[List[np.ndarray]] = (
+                                [] if use_checkpoint else None
+                            )
+                            for audio in backend.generate(
+                                text=chunk.text,
+                                voice=args.voice,
+                                speed=args.speed,
+                                split_pattern=args.split_pattern,
+                            ):
+                                int16_audio = audio_to_int16(audio)
+                                if use_mp3_stream:
+                                    if mp3_export_proc is None or mp3_export_proc.stdin is None:
+                                        raise RuntimeError("MP3 export process is not writable.")
+                                    mp3_export_proc.stdin.write(int16_audio.tobytes())
+                                else:
+                                    if spool is None:
+                                        raise RuntimeError("Spool writer is not available.")
+                                    spool.write(int16_audio.tobytes())
+                                cumulative_samples += len(int16_audio)
 
-                                for audio in backend.generate(
-                                    text=chunk.text,
-                                    voice=args.voice,
-                                    speed=args.speed,
-                                    split_pattern=args.split_pattern,
-                                ):
-                                    int16_audio = audio_to_int16(audio)
-                                    if use_mp3_stream:
-                                        if mp3_export_proc is None or mp3_export_proc.stdin is None:
-                                            raise RuntimeError("MP3 export process is not writable.")
-                                        mp3_export_proc.stdin.write(int16_audio.tobytes())
-                                    else:
-                                        if spool is None:
-                                            raise RuntimeError("Spool writer is not available.")
-                                        spool.write(int16_audio.tobytes())
-                                    cumulative_samples += len(int16_audio)
+                                if checkpoint_parts is not None:
+                                    checkpoint_parts.append(int16_audio)
 
-                                    if chunk_tmp_fp is not None:
-                                        chunk_tmp_fp.write(int16_audio.tobytes())
+                            elapsed = time.perf_counter() - start
+                            times.append(elapsed)
 
-                                elapsed = time.perf_counter() - start
-                                times.append(elapsed)
+                            if checkpoint_parts is not None:
+                                if checkpoint_parts:
+                                    chunk_audio = np.concatenate(checkpoint_parts)
+                                else:
+                                    chunk_audio = np.array([], dtype=np.int16)
+                                save_chunk_audio(checkpoint_dir, idx, chunk_audio)
+                                completed_chunks.add(idx)
+                                if checkpoint_state is not None:
+                                    checkpoint_state.completed_chunks = sorted(completed_chunks)
+                                    save_checkpoint(checkpoint_dir, checkpoint_state)
+                                events.emit("checkpoint", code="SAVED", detail=idx)
 
-                                if use_checkpoint:
-                                    if chunk_tmp_fp is not None:
-                                        chunk_tmp_fp.close()
-                                        chunk_tmp_fp = None
-
-                                    if chunk_tmp_path and os.path.exists(chunk_tmp_path) and os.path.getsize(chunk_tmp_path) > 0:
-                                        chunk_audio = np.fromfile(chunk_tmp_path, dtype=np.int16)
-                                    else:
-                                        chunk_audio = np.array([], dtype=np.int16)
-
-                                    save_chunk_audio(checkpoint_dir, idx, chunk_audio)
-                                    completed_chunks.add(idx)
-                                    if checkpoint_state is not None:
-                                        checkpoint_state.completed_chunks = sorted(completed_chunks)
-                                        save_checkpoint(checkpoint_dir, checkpoint_state)
-                                    events.emit("checkpoint", code="SAVED", detail=idx)
-
-                                events.emit("timing", chunk_idx=idx, chunk_timing_ms=int(elapsed * 1000))
-                            finally:
-                                if chunk_tmp_fp is not None:
-                                    chunk_tmp_fp.close()
-                                if chunk_tmp_path and os.path.exists(chunk_tmp_path):
-                                    try:
-                                        os.remove(chunk_tmp_path)
-                                    except OSError:
-                                        pass
+                            events.emit(
+                                "timing",
+                                chunk_idx=idx,
+                                chunk_timing_ms=int(elapsed * 1000),
+                                stage="infer",
+                            )
 
                         processed_count += 1
 
-                        now = time.time()
-                        if now - last_heartbeat >= 5:
-                            heartbeat_ts = int(now * 1000)
-                            events.emit("heartbeat", heartbeat_ts=heartbeat_ts)
-                            last_heartbeat = now
+                        emit_heartbeat_if_needed()
 
                         if progress and task_id is not None:
                             progress.update(task_id, advance=1)
@@ -1302,11 +1342,145 @@ def main() -> None:
                             total_chunks=total_chunks,
                         )
 
+            def run_inference_overlap3() -> None:
+                nonlocal cumulative_samples
+                if mp3_export_proc is None or mp3_export_proc.stdin is None:
+                    raise RuntimeError("MP3 export process is not writable.")
+
+                inference_queue_max = max(2, args.prefetch_chunks * 2)
+                pcm_queue_max = max(2, args.pcm_queue_size)
+
+                inference_queue: queue.Queue = queue.Queue(maxsize=inference_queue_max)
+                pcm_queue: queue.Queue = queue.Queue(maxsize=pcm_queue_max)
+                worker_errors: queue.Queue = queue.Queue()
+
+                def inference_worker() -> None:
+                    try:
+                        for idx, chunk in enumerate(chunks):
+                            inference_queue.put(("start", idx, None))
+                            start = time.perf_counter()
+                            for audio in backend.generate(
+                                text=chunk.text,
+                                voice=args.voice,
+                                speed=args.speed,
+                                split_pattern=args.split_pattern,
+                            ):
+                                inference_queue.put(("audio", idx, audio))
+                            infer_ms = int((time.perf_counter() - start) * 1000)
+                            inference_queue.put(("done", idx, infer_ms))
+                    except Exception as exc:  # pragma: no cover - exercised via integration path
+                        worker_errors.put(exc)
+                    finally:
+                        inference_queue.put(("end", -1, None))
+
+                def convert_worker() -> None:
+                    try:
+                        while True:
+                            kind, idx, payload = inference_queue.get()
+                            if kind == "end":
+                                break
+                            if kind == "audio":
+                                payload = audio_to_int16(payload)
+                            pcm_queue.put((kind, idx, payload))
+                    except Exception as exc:  # pragma: no cover - exercised via integration path
+                        worker_errors.put(exc)
+                    finally:
+                        pcm_queue.put(("end", -1, None))
+
+                infer_thread = threading.Thread(
+                    target=inference_worker, name="tts-infer", daemon=True
+                )
+                convert_thread = threading.Thread(
+                    target=convert_worker, name="tts-convert", daemon=True
+                )
+                infer_thread.start()
+                convert_thread.start()
+
+                chunk_started = [False] * total_chunks
+                processed_count = 0
+                try:
+                    while True:
+                        if not worker_errors.empty():
+                            raise worker_errors.get()
+
+                        try:
+                            kind, idx, payload = pcm_queue.get(timeout=0.25)
+                        except queue.Empty:
+                            emit_heartbeat_if_needed()
+                            continue
+
+                        if kind == "end":
+                            break
+
+                        if idx < 0 or idx >= total_chunks:
+                            raise RuntimeError(f"Invalid chunk index from overlap3 pipeline: {idx}")
+
+                        if kind == "start":
+                            chunk_sample_offsets[idx] = cumulative_samples
+                            chunk_started[idx] = True
+                            events.emit(
+                                "worker",
+                                id=0,
+                                status="INFER",
+                                details=f"Chunk {idx+1}/{total_chunks}",
+                            )
+                            continue
+
+                        if kind == "audio":
+                            if not chunk_started[idx]:
+                                chunk_sample_offsets[idx] = cumulative_samples
+                                chunk_started[idx] = True
+                            int16_audio = payload
+                            mp3_export_proc.stdin.write(int16_audio.tobytes())
+                            cumulative_samples += len(int16_audio)
+                            continue
+
+                        if kind == "done":
+                            infer_ms = int(payload)
+                            times.append(infer_ms / 1000.0)
+                            events.emit(
+                                "worker",
+                                id=0,
+                                status="ENCODE",
+                                details=f"Chunk {idx+1}/{total_chunks}",
+                            )
+                            events.emit(
+                                "timing",
+                                chunk_idx=idx,
+                                chunk_timing_ms=infer_ms,
+                                stage="infer",
+                            )
+
+                            processed_count += 1
+                            if progress and task_id is not None:
+                                progress.update(task_id, advance=1)
+                            events.emit(
+                                "progress",
+                                current_chunk=processed_count,
+                                total_chunks=total_chunks,
+                            )
+                            emit_heartbeat_if_needed()
+                            continue
+
+                        raise RuntimeError(f"Unknown overlap3 pipeline message type: {kind}")
+
+                    if not worker_errors.empty():
+                        raise worker_errors.get()
+                finally:
+                    infer_thread.join(timeout=2)
+                    convert_thread.join(timeout=2)
+
             if progress:
                 with progress:
-                    run_inference()
+                    if pipeline_mode == "overlap3":
+                        run_inference_overlap3()
+                    else:
+                        run_inference_sequential()
             else:
-                run_inference()
+                if pipeline_mode == "overlap3":
+                    run_inference_overlap3()
+                else:
+                    run_inference_sequential()
 
             # Phase: Concatenating (kept for CLI protocol compatibility)
             events.emit("phase", phase="CONCATENATING")

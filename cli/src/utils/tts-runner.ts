@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -43,6 +43,7 @@ interface JsonEvent {
     key?: string;
     value?: string | number | boolean;
     chunk_timing_ms?: number;
+    stage?: string;
     heartbeat_ts?: number;
     id?: number;
     status?: string;
@@ -348,34 +349,29 @@ export function parseOutputLine(line: string, state: ParserState): ProgressInfo 
     return null;
 }
 
-function resolveBackendForEnv(config: TTSConfig, projectRoot: string, pythonPath: string): ResolvedBackend {
-    if (config.backend === 'pytorch' || config.backend === 'mlx' || config.backend === 'mock') {
-        return config.backend;
+function parsePositiveInt(value: string | undefined): number | undefined {
+    if (!value) {
+        return undefined;
     }
-
-    if (!(process.platform === 'darwin' && process.arch === 'arm64')) {
-        return 'pytorch';
+    const parsed = parseInt(value, 10);
+    if (Number.isNaN(parsed) || parsed <= 0) {
+        return undefined;
     }
+    return parsed;
+}
 
-    try {
-        const probe = spawnSync(
-            pythonPath,
-            ['-c', 'import mlx.core as mx; mx.array([1.0]); print("mlx")'],
-            {
-                cwd: projectRoot,
-                encoding: 'utf-8',
-                timeout: 5000,
-            }
-        );
+function resolveThreadEnvOverrides(): { ompThreads: string; openBlasThreads: string } {
+    const cpuCount = Math.max(1, os.cpus().length || 1);
+    const defaultOmp = Math.min(Math.max(4, Math.floor(cpuCount * 0.5)), 8);
+    const defaultOpenBlas = Math.min(Math.max(1, Math.floor(defaultOmp / 2)), 4);
 
-        if (probe.status === 0 && probe.stdout.trim() === 'mlx') {
-            return 'mlx';
-        }
-    } catch {
-        // Ignore probe failures and use conservative fallback.
-    }
+    const ompOverride = parsePositiveInt(process.env.AUDIOBOOK_OMP_THREADS);
+    const openBlasOverride = parsePositiveInt(process.env.AUDIOBOOK_OPENBLAS_THREADS);
 
-    return 'pytorch';
+    return {
+        ompThreads: String(ompOverride ?? defaultOmp),
+        openBlasThreads: String(openBlasOverride ?? defaultOpenBlas),
+    };
 }
 
 function getRunLogPath(projectRoot: string): string {
@@ -399,7 +395,6 @@ export function runTTS(
 ): Promise<void> {
     return new Promise((resolve, reject) => {
         const { projectRoot, appPath: pythonScript, pythonPath } = resolvePythonRuntime();
-        const backendForEnv = resolveBackendForEnv(config, projectRoot, pythonPath);
         const logFile = getRunLogPath(projectRoot);
         const verbose = process.env.AUDIOBOOK_VERBOSE === '1' || process.env.AUDIOBOOK_VERBOSE === 'true';
 
@@ -427,12 +422,13 @@ export function runTTS(
             '--no_rich',
         ];
 
-        const isPyTorchBackend = backendForEnv === 'pytorch';
-        const mpsEnvVars = isPyTorchBackend && config.useMPS ? {
+        const { ompThreads, openBlasThreads } = resolveThreadEnvOverrides();
+        const shouldSetPytorchMpsEnv = config.useMPS && config.backend !== 'mlx' && config.backend !== 'mock';
+        const mpsEnvVars = shouldSetPytorchMpsEnv ? {
             PYTORCH_ENABLE_MPS_FALLBACK: '1',
             PYTORCH_MPS_HIGH_WATERMARK_RATIO: '0.0',
-            OMP_NUM_THREADS: '4',
-            OPENBLAS_NUM_THREADS: '2',
+            OMP_NUM_THREADS: ompThreads,
+            OPENBLAS_NUM_THREADS: openBlasThreads,
         } : {};
 
         const childProc = spawn(pythonPath, args, {
