@@ -1,369 +1,274 @@
-<div align="center">
+# AI Audiobook Fast
 
-# 🎧 Audiobook Maker
+Convert EPUB books into MP3 or M4B audiobooks using Kokoro TTS.
 
-### Transform EPUBs into Beautiful Audiobooks with AI
+This repo has two main parts:
+- `cli/`: an interactive terminal UI (Ink + React + TypeScript)
+- `app.py`: the Python backend that parses EPUBs, runs TTS, and exports audio via `ffmpeg`
 
-[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![Python](https://img.shields.io/badge/Python-3.10--3.12-3776AB?logo=python&logoColor=white)](https://python.org/)
+## Documentation
 
-<img src="photo.png" alt="Audiobook Maker Preview" width="600" />
+- `README.md`: quick start, usage, examples
+- `ARCHITECTURE.md`: system design, pipeline modes, IPC protocol
+- `CHECKPOINTS.md`: resume/checkpoint lifecycle and troubleshooting
+- `FORMATS_AND_METADATA.md`: MP3 vs M4B behavior and metadata overrides
+- `CLAUDE.md`: repo-specific guidance for coding agents/contributors
 
-*Generate studio-quality audiobooks from EPUB files using the advanced Kokoro TTS engine*
+## Features
 
-[Getting Started](#-quick-start) • [Features](#-features) • [Documentation](#-usage) • [Contributing](#-contributing)
+- Interactive terminal UI with setup checks and batch processing
+- Direct backend CLI usage (`python app.py ...`) for scripting/automation
+- MP3 and M4B output formats
+- M4B chapter markers plus title/author/cover metadata overrides
+- Checkpoint/resume support for long jobs (opt-in checkpoint writes)
+- Auto backend selection (`auto`, `pytorch`, `mlx`, `mock`)
+- Structured JSON or legacy text progress events for integrations
+- Direct `ffmpeg` export pipeline (streaming MP3 path when possible)
 
-</div>
+## Quick Start (macOS)
 
----
-
-## ✨ Features
-
-<table>
-<tr>
-<td>
-
-🎨 **Beautiful Interactive CLI**
-Gorgeous terminal UI with gradient colors, ASCII art, and smooth animations
-
-</td>
-<td>
-
-📚 **Batch Processing**
-Convert multiple EPUBs at once using glob patterns (`*.epub`)
-
-</td>
-</tr>
-<tr>
-<td>
-
-🎙️ **11+ Premium Voices**
-Choose from American & British accents, male & female voices
-
-</td>
-<td>
-
-⚡ **Speed Control**
-Adjust playback speed from 0.75x to 1.5x
-
-</td>
-</tr>
-<tr>
-<td>
-
-📊 **Real-time GPU Monitoring**
-Live GPU usage visualization with sparklines (Apple Silicon)
-
-</td>
-<td>
-
-🧩 **Pipeline Visualization**
-Watch GPU inference and background encoding progress in real-time
-
-</td>
-</tr>
-<tr>
-<td>
-
-🚀 **Optimized Pipeline**
-Sequential GPU inference + background encoding for maximum throughput on Apple Silicon
-
-</td>
-<td>
-
-🔧 **Highly Configurable**
-Tune chunk size and more for optimal performance
-
-</td>
-</tr>
-</table>
-
----
-
-## 🚀 Quick Start
-
-### One-Command Setup (macOS)
+`setup.sh` is a macOS-focused bootstrap script that sources `scripts/setup-macos.sh`.
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/lichen0114/ai_audiobook_fast.git
 cd ai_audiobook_fast
-
-# 2. Run the setup script (installs everything!)
 ./setup.sh
-
-# 3. Start making audiobooks
 cd cli && npm run dev
 ```
 
-The setup script will automatically:
-- Install Homebrew (if needed)
-- Install FFmpeg, Python 3.12, and Node.js
-- Set up the Python virtual environment
-- Install all dependencies
-- Optionally pre-download the AI model (~1GB)
+What `./setup.sh` does:
+- Checks/installs Homebrew (optional prompt)
+- Installs `ffmpeg`
+- Installs a compatible Python (3.10-3.12, usually 3.12)
+- Installs Node.js 18+
+- Creates `.venv`
+- Installs Python deps from `requirements.txt`
+- Installs CLI deps in `cli/` via `npm install`
+- Optionally installs MLX backend deps (`requirements-mlx.txt`)
+- Optionally pre-downloads the Kokoro model
 
-### Manual Installation
+## Manual Setup
 
-<details>
-<summary>Click to expand manual setup instructions</summary>
+### Prerequisites
 
-#### Prerequisites
+- `ffmpeg` available on PATH
+- Python `3.10`, `3.11`, or `3.12`
+- Node.js `18+` (for the interactive CLI)
 
-| Requirement | Version | Notes |
-|-------------|---------|-------|
-| Node.js | 18+ | For the interactive CLI |
-| Python | 3.10–3.12 | Kokoro TTS doesn't support 3.13+ yet |
-| FFmpeg | Latest | Required for MP3 export |
-
-#### Steps
+### Install
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/lichen0114/ai_audiobook_fast.git
 cd ai_audiobook_fast
 
-# 2. Install FFmpeg (macOS)
-brew install ffmpeg
-
-# 3. Set up Python environment
+# Python runtime
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 4. Install CLI dependencies
-cd cli && npm install
+# Optional: test tooling
+pip install -r requirements-dev.txt
+
+# Optional: MLX backend (Apple Silicon)
+pip install -r requirements-mlx.txt
+
+# Interactive CLI
+npm install --prefix cli
 ```
 
-</details>
+## Usage
 
-### Launch
+### Interactive CLI (recommended)
 
 ```bash
-# Start the interactive CLI
 cd cli && npm run dev
+```
 
-# For Apple Silicon GPU acceleration (recommended for M1/M2/M3 Macs)
+Apple Silicon users can also start the dev CLI with `PYTORCH_ENABLE_MPS_FALLBACK=1` pre-set:
+
+```bash
 cd cli && npm run dev:mps
 ```
 
----
+Current interactive flow:
+1. Preflight checks (`ffmpeg`, `.venv`, Python deps, backend script)
+2. File selection (single file, folder, or pattern)
+3. Configuration wizard (accent, voice, speed, backend, format, quality, checkpoint, GPU, output)
+4. M4B metadata editor (only when output format is `m4b`)
+5. Resume dialog (if a valid checkpoint exists)
+6. Batch processing view with live progress and phase updates
 
-## 📖 Usage
+### Direct backend CLI (for scripts/automation)
 
-### Interactive Mode *(Recommended)*
-
-Launch the beautiful terminal interface:
-
-```bash
-npm run dev
-```
-
-The interactive CLI guides you through:
-1. 📂 **File Selection** — Choose single files, folders, or use patterns like `*.epub`
-2. ⚙️ **Configuration** — Pick your voice, adjust speed, set worker count, and language
-3. 🎧 **Processing** — Watch real-time progress as audiobooks are generated
-
-### Command Line Mode
-
-For scripting and automation:
+Basic conversion:
 
 ```bash
-python app.py --input /path/to/book.epub --output /path/to/book.mp3
+.venv/bin/python app.py --input book.epub --output book.mp3
 ```
 
-<details>
-<summary><strong>📋 All Command Line Options</strong></summary>
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--input` | *required* | Path to input EPUB file |
-| `--output` | *required* | Path to output MP3 file |
-| `--voice` | `af_heart` | Voice selection (see below) |
-| `--lang_code` | `a` | Language code |
-| `--speed` | `1.0` | Speech speed (0.75–1.5) |
-| `--chunk_chars` | `900` (MLX) / `600` (PyTorch) | Characters per audio chunk |
-| `--workers` | `2` | Parallel workers for audio encoding (increase for faster processing) |
-
-</details>
-
----
-
-## 🎙️ Available Voices
-
-<table>
-<tr>
-<th colspan="2">🇺🇸 American English</th>
-<th colspan="2">🇬🇧 British English</th>
-</tr>
-<tr>
-<td><code>af_heart</code></td>
-<td>Female — Warm & Friendly</td>
-<td><code>bf_emma</code></td>
-<td>Female — Elegant</td>
-</tr>
-<tr>
-<td><code>af_bella</code></td>
-<td>Female — Confident</td>
-<td><code>bf_isabella</code></td>
-<td>Female — Sophisticated</td>
-</tr>
-<tr>
-<td><code>af_nicole</code></td>
-<td>Female — Friendly</td>
-<td><code>bm_george</code></td>
-<td>Male — Classic</td>
-</tr>
-<tr>
-<td><code>af_sarah</code></td>
-<td>Female — Professional</td>
-<td><code>bm_lewis</code></td>
-<td>Male — Modern</td>
-</tr>
-<tr>
-<td><code>af_sky</code></td>
-<td>Female — Energetic</td>
-<td></td>
-<td></td>
-</tr>
-<tr>
-<td><code>am_adam</code></td>
-<td>Male — Calm</td>
-<td></td>
-<td></td>
-</tr>
-<tr>
-<td><code>am_michael</code></td>
-<td>Male — Authoritative</td>
-<td></td>
-<td></td>
-</tr>
-</table>
-
----
-
-## 🖥️ CLI Preview
-
-```
-  🎧 Processing Audiobooks
-
-╭─────────────────────────────────────╮
-│                                     │
-│  Currently Processing:              │
-│  Book1.epub                         │
-│                                     │
-│  Chunk: 14/35 (40%)                 │
-│  ████████████░░░░░░░░░░░░░░░░░░     │
-│                                     │
-╰─────────────────────────────────────╯
-
-╭− 👷 Processing ─────────────────────╮
-│                                     │
-│  GPU: INFER  Chunk 15/35            │
-│  Encoder: Converting to int16       │
-│                                     │
-╰─────────────────────────────────────╯
-
-╭──────────────────────────────────────────────╮
-│                                              │
-│  Overall Progress: 1/2 files                 │
-│  ⏱️  ETA: 45 sec                             │
-│                                              │
-│  ██████████████████████░░░░░░░░░░░░░░░░░░░░  │
-│                                              │
-╰──────────────────────────────────────────────╯
-
- GPU Usage:  ▇▄ ▆▃ █▅ ▂▄ ▆▃ 
- Memory:     3.2 GB / 16 GB
-
- 📚 Files
-   ✔ Book_Volume_1.epub → saved
-   ► Book_Volume_2.epub
-       ████████████░░░░░░░░░░░░░░░░░ (40%)
-   ⏳ Book_Volume_3.epub
-```
-
----
-
-## 🏗️ Architecture
-
-For a detailed technical overview of the project structure and data flow, please refer to [ARCHITECTURE.md](ARCHITECTURE.md).
-
----
-
-## 📝 Technical Notes
-
-- **Optimized Pipeline** — Sequential GPU inference (main thread) + background CPU encoding thread. This avoids GPU contention that slows down multi-threaded approaches on MPS
-- **O(n) Audio Assembly** — Stores int16 numpy arrays during processing, concatenates once at the end (vs O(n²) AudioSegment concatenation)
-- **Audio Export** — Uses FFmpeg via `pydub` for high-quality MP3 encoding
-- **ETA Calculation** — Based on rolling average, stabilizes after first few chunks
-- **Output Naming** — Files are saved with the same name as input (`.epub` → `.mp3`)
-- **GPU Support** — Apple Silicon Macs use MPS acceleration with optimized memory settings
-
-### Performance Tips
+Common examples:
 
 ```bash
-# For maximum speed on Apple Silicon:
-python app.py --input book.epub --output book.mp3
+# Select backend explicitly
+.venv/bin/python app.py --backend pytorch --input book.epub --output book.mp3
+.venv/bin/python app.py --backend mlx --input book.epub --output book.mp3
+
+# M4B with metadata overrides and cover art
+.venv/bin/python app.py --format m4b --title "Book Title" --author "Author" \
+  --cover ./cover.jpg --input book.epub --output book.m4b
+
+# Enable checkpoint writes, then resume a later run
+.venv/bin/python app.py --checkpoint --input book.epub --output book.mp3
+.venv/bin/python app.py --resume --input book.epub --output book.mp3
+
+# Check checkpoint status only
+.venv/bin/python app.py --check_checkpoint --input book.epub --output book.mp3
+
+# Emit JSON events for integrations and write backend logs to a file
+.venv/bin/python app.py --event_format json --log_file ./run.log \
+  --input book.epub --output book.mp3
+
+# Force pipeline mode (advanced)
+.venv/bin/python app.py --pipeline_mode sequential --input book.epub --output book.mp3
 ```
 
-- **Workers**: On Apple Silicon, 1-2 workers is optimal. The GPU serializes operations via MPS, so more workers add overhead without speedup
-- **Chunk size**: Defaults are optimized per backend (900 for MLX, 600 for PyTorch). Override with `--chunk_chars` if needed
-- **Memory**: The optimized pipeline uses O(n) audio concatenation, keeping memory usage flat even for large books
+### Backend options (high-value flags)
 
----
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--voice` | `af_heart` | Kokoro voice id |
+| `--lang_code` | `a` | `a` = American, `b` = British |
+| `--speed` | `1.0` | Speech speed multiplier |
+| `--backend` | `auto` | `auto`, `pytorch`, `mlx`, `mock` |
+| `--chunk_chars` | backend-dependent | `900` (MLX) / `600` (PyTorch) when omitted |
+| `--split_pattern` | `\n+` | Regex for internal text splitting |
+| `--format` | `mp3` | `mp3` or `m4b` |
+| `--bitrate` | `192k` | `128k`, `192k`, `320k` |
+| `--normalize` | off | Applies `loudnorm` target around -14 LUFS |
+| `--checkpoint` | off | Enables checkpoint writes for resume support |
+| `--resume` | off | Attempts to resume from checkpoint (also enables checkpoint mode) |
+| `--check_checkpoint` | off | Reports checkpoint status and exits |
+| `--pipeline_mode` | auto | `sequential` or `overlap3`; `overlap3` is restricted |
+| `--prefetch_chunks` | `2` | `overlap3` tuning |
+| `--pcm_queue_size` | `4` | `overlap3` tuning |
+| `--workers` | `2` | Compatibility flag; inference is still sequential |
+| `--event_format` | `text` | `json` is used by the interactive CLI |
+| `--log_file` | none | Append backend logs/events to file |
+| `--no_checkpoint` | off | Deprecated no-op (checkpointing is already opt-in) |
 
-## 🧪 Testing
+## Output Formats and Metadata
 
-### Fast local checks
+### MP3
+
+- Default output format
+- Uses direct `ffmpeg` export
+- When checkpointing is off, runtime can stream PCM directly to `ffmpeg` (no spool file)
+- Supports `--bitrate` and optional `--normalize`
+
+### M4B
+
+- Uses AAC in an `.m4b` container via `ffmpeg`
+- Embeds chapter markers derived from EPUB chapter boundaries
+- Supports metadata from EPUB plus overrides (`--title`, `--author`, `--cover`)
+- Current CLI shows a metadata review/edit screen before M4B processing
+
+More detail: `FORMATS_AND_METADATA.md`
+
+## Checkpoint and Resume (Quick Guide)
+
+Checkpoint files are stored next to the output file as:
+
+- `<output>.checkpoint/state.json`
+- `<output>.checkpoint/chunk_000000.npy`, etc.
+
+Typical flow:
 
 ```bash
-# Python (skips slow marker)
+# First run (create checkpoint while processing)
+.venv/bin/python app.py --checkpoint --input book.epub --output book.mp3
+
+# Resume later
+.venv/bin/python app.py --resume --input book.epub --output book.mp3
+```
+
+Resume is only used when the checkpoint matches:
+- EPUB file hash
+- key generation/export settings (voice, speed, backend, chunking, format, bitrate, normalize, etc.)
+
+More detail: `CHECKPOINTS.md`
+
+## Voices
+
+American (`--lang_code a`):
+- `af_heart` (default)
+- `af_bella`
+- `af_nicole`
+- `af_sarah`
+- `af_sky`
+- `am_adam`
+- `am_michael`
+
+British (`--lang_code b`):
+- `bf_emma`
+- `bf_isabella`
+- `bm_george`
+- `bm_lewis`
+
+## Technical Notes
+
+- Runtime export uses `ffmpeg` directly via subprocesses (streaming and file-based paths). The `pydub` dependency remains for compatibility helpers/tests, not the main export path.
+- `--workers` is currently a compatibility setting. The backend warns when it is not `1`, and inference remains sequential.
+- `--pipeline_mode overlap3` is currently supported only for MP3 output without checkpointing. Incompatible combinations fall back to sequential mode with a warning.
+- `--backend auto` resolves to MLX on Apple Silicon when `mlx-audio` is installed and a runtime probe succeeds; otherwise it falls back to PyTorch.
+
+## Testing
+
+### Python
+
+```bash
+# Fast suite (no slow tests); CI also uses --cov-fail-under=75
 .venv/bin/python -m pytest -m "not slow" --cov=app --cov-fail-under=75
 
-# CLI
+# Subprocess E2E tests (uses the mock backend in test scenarios)
+.venv/bin/python -m pytest tests/e2e
+
+# Slow ffmpeg/format validation tests
+.venv/bin/python -m pytest -m slow
+```
+
+### CLI
+
+```bash
 npm test --prefix cli
 npm run test:coverage --prefix cli
 ```
 
-### Full subprocess E2E checks
+Current CLI coverage thresholds (Vitest config):
+- Statements: `60%`
+- Branches: `50%`
+- Functions: `60%`
+- Lines: `60%`
 
-```bash
-# Python subprocess E2E (uses --backend mock internally)
-.venv/bin/python -m pytest tests/e2e
+### CI (GitHub Actions)
 
-# Slow real ffmpeg validation
-.venv/bin/python -m pytest -m slow
-```
+`/.github/workflows/tests.yml` runs:
+- Fast PR job: Python tests (with `--cov-fail-under=75`) + CLI tests + CLI coverage
+- Slow job: `pytest -m slow` on schedule/manual dispatch
 
-### CI quality gates
-- Python coverage gate: `app.py` must stay at or above **75%**
-- CLI coverage gates (Vitest): **60%** statements/functions/lines and **50%** branches
-- Scheduled/manual CI also runs `pytest -m slow` for real ffmpeg/M4B validation
+## Architecture
 
----
+See `ARCHITECTURE.md` for the detailed runtime and module design.
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome! Feel free to:
+Issues and pull requests are welcome.
 
-- 🐛 Report bugs
-- 💡 Suggest new features
-- 🔧 Submit pull requests
+If you change runtime behavior or CLI flags, update:
+- `README.md`
+- `ARCHITECTURE.md`
+- `CHECKPOINTS.md` and/or `FORMATS_AND_METADATA.md` (if relevant)
+- `CLAUDE.md` (if contributor/agent workflow changed)
 
----
+## License
 
-## 📄 License
-
-This project is licensed under the [MIT License](LICENSE).
-
----
-
-<div align="center">
-
-**Made with ❤️ by [Li-Chen Wang](https://github.com/lichen0114)**
-
-*Powered by [Kokoro TTS](https://github.com/hexgrad/kokoro)*
-
-</div>
+MIT (`LICENSE`)

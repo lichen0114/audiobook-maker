@@ -1,149 +1,197 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) and other coding agents working in this repository.
 
 ## Project Overview
 
-AI Audiobook Fast converts EPUB files into MP3 or M4B audiobooks using Kokoro TTS. It has a two-tier architecture:
-- **Frontend CLI** (`cli/`): Node.js/TypeScript/React terminal UI using Ink
-- **Backend** (`app.py`): Python script handling EPUB parsing and TTS generation
+AI Audiobook Fast converts EPUB files into MP3 or M4B audiobooks using Kokoro TTS.
 
-The CLI spawns the Python process and communicates via stdout (IPC protocol with structured messages).
+Runtime architecture:
+- `cli/`: interactive terminal UI (TypeScript + Ink + React)
+- `app.py`: Python backend for EPUB parsing, TTS generation, checkpointing, and export
+- `backends/`: pluggable TTS backends (`pytorch`, `mlx`, `mock`)
+- `checkpoint.py`: resumable processing state and chunk persistence
+
+The CLI launches the Python backend as a subprocess and parses its event stream (JSON in normal CLI operation; legacy text parsers remain for some helper flows).
+
+## Documentation Map
+
+Use these docs together when changing behavior:
+- `README.md`: end-user setup and usage
+- `ARCHITECTURE.md`: runtime design, pipeline modes, IPC
+- `CHECKPOINTS.md`: checkpoint/resume details
+- `FORMATS_AND_METADATA.md`: MP3/M4B and metadata behavior
 
 ## Common Commands
 
 ### Setup
+
 ```bash
-./setup.sh                      # One-command setup (installs everything)
+./setup.sh
 
 # Manual setup
-python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
-cd cli && npm install
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Optional test tooling
+pip install -r requirements-dev.txt
+
+# Optional MLX backend (Apple Silicon)
+pip install -r requirements-mlx.txt
+
+# CLI deps
+npm install --prefix cli
 ```
 
-### Development
+### Development (interactive CLI)
+
 ```bash
-cd cli
-npm run dev                     # Start interactive CLI
-npm run dev:mps                 # With Apple Silicon GPU acceleration
-npm run build                   # Compile TypeScript
+npm run dev --prefix cli
+npm run dev:mps --prefix cli
+npm run build --prefix cli
+npm start --prefix cli
 ```
 
 ### Testing
+
 ```bash
-# Python (from repo root)
+# Python fast tests + coverage gate used in CI workflow
 .venv/bin/python -m pytest -m "not slow" --cov=app --cov-fail-under=75
+
+# Python subprocess e2e tests
 .venv/bin/python -m pytest tests/e2e
+
+# Slow format/ffmpeg validation tests
 .venv/bin/python -m pytest -m slow
 
-# CLI (from cli/)
-npm test                        # All tests
-npm run test:watch              # Watch mode
-npm run test:coverage           # With coverage
+# CLI tests
+npm test --prefix cli
+npm run test:coverage --prefix cli
 ```
 
-### Direct Python Usage
+### Direct Backend Usage (Examples)
+
 ```bash
-python app.py --input book.epub --output book.mp3 --voice af_heart --speed 1.0
-python app.py --backend mlx --input book.epub --output book.mp3  # MLX backend (faster)
-python app.py --backend mock --input book.epub --output book.mp3 # Deterministic test backend
-python app.py --format m4b --input book.epub --output book.m4b   # M4B with chapters
-python app.py --bitrate 320k --normalize --input book.epub --output book.mp3  # High quality + normalization
-python app.py --resume --input book.epub --output book.mp3       # Resume from checkpoint
+# Basic MP3
+.venv/bin/python app.py --input book.epub --output book.mp3
+
+# Explicit backend
+.venv/bin/python app.py --backend mlx --input book.epub --output book.mp3
+
+# M4B with metadata overrides
+.venv/bin/python app.py --format m4b --title "Title" --author "Author" \
+  --cover ./cover.jpg --input book.epub --output book.m4b
+
+# Checkpoint create/resume
+.venv/bin/python app.py --checkpoint --input book.epub --output book.mp3
+.venv/bin/python app.py --resume --input book.epub --output book.mp3
+
+# Integration mode (JSON events)
+.venv/bin/python app.py --event_format json --log_file ./run.log \
+  --input book.epub --output book.mp3
 ```
 
-## Architecture
+## Current Architecture Highlights
 
-### Backend Abstraction Layer (`backends/`)
-TTS backends are pluggable via an abstraction layer:
-- `base.py` - `TTSBackend` abstract base class defining the interface (`initialize`, `generate`, `cleanup`)
-- `kokoro_pytorch.py` - Default PyTorch/Kokoro implementation (uses MPS on Apple Silicon)
-- `kokoro_mlx.py` - MLX implementation for faster inference on Apple Silicon
-- `mock.py` - Deterministic backend for subprocess E2E tests
-- `factory.py` - `create_backend(type)` factory function, `get_available_backends()` for discovery
+### CLI flow (`cli/src/App.tsx`)
 
-The `--backend` flag selects which backend to use (`auto`, `pytorch`, `mlx`, or `mock`). MLX requires separate installation (`pip install -r requirements-mlx.txt`).
+Current screen/state sequence:
+- `checking`
+- `setup-required` or `welcome`
+- `files`
+- `config`
+- `metadata` (M4B only)
+- `resume` (when checkpoint exists and is valid)
+- `processing`
+- `done`
 
-### Checkpoint System (`checkpoint.py`)
-Enables resumable processing for long audiobooks:
-- `CheckpointState` dataclass stores EPUB hash, config, completed chunks, chapter indices
-- Chunk audio saved as `.npy` files in `<output>.checkpoint/` directory
-- `--resume` loads checkpoint and skips completed chunks
-- `--no_checkpoint` disables checkpoint saving
-- Checkpoint automatically cleaned up after successful completion
-
-### Frontend (`cli/src/`)
-- `App.tsx` - Main component with state machine: `checking` → `setup-required`|`welcome` → `files` → `config` → `metadata` → `resume` → `processing` → `done`
-- `utils/tts-runner.ts` - Spawns Python process, sets MPS env vars (PyTorch only), parses stdout progress
-- `utils/preflight.ts` - Checks for FFmpeg, Python venv, Kokoro, and optionally MLX
-- `utils/metadata.ts` - Extracts EPUB metadata via Python backend
-- `utils/checkpoint.ts` - Checks for existing checkpoints via Python backend
-- `components/ConfigPanel.tsx` - Multi-step wizard: accent → voice → speed → backend → format → quality → workers → gpu → output
-- `components/MetadataEditor.tsx` - Edit M4B metadata (title/author/cover) before export
-- `components/ResumeDialog.tsx` - Resume or start fresh when checkpoint found
+Important implementation details:
+- M4B runs call `extractMetadata()` before processing and allow title/author/cover overrides.
+- Checkpoint pre-check uses `checkCheckpoint()` and shows a resume dialog before starting.
+- Choosing “start fresh” deletes `<output>.checkpoint/` for the checked file.
 
 ### Backend (`app.py`)
-Sequential inference + background encoding pipeline:
-1. Extract EPUB text and metadata, split into chunks (default: 900 chars for MLX, 600 for PyTorch)
-2. Check for checkpoint if `--resume` flag set
-3. Backend generates audio sequentially, queues for encoding
-4. Background thread(s) convert audio to int16 numpy arrays (`--workers` controls parallelism)
-5. Save chunk audio to checkpoint after each chunk (unless `--no_checkpoint`)
-6. Results concatenated with `np.concatenate()` (O(n) vs O(n²)), tracking chapter sample positions
-7. Raw PCM piped to ffmpeg for MP3/M4B export (bypasses WAV 4GB limit)
-8. Clean up checkpoint on successful completion
 
-**Why sequential GPU?** MPS serializes GPU operations; threading is 0.88x slower.
+Key runtime responsibilities:
+- parse flags and validate inputs
+- resolve TTS backend (`auto`, `pytorch`, `mlx`, `mock`)
+- choose pipeline mode (`sequential` or `overlap3`)
+- parse EPUB and chunk text
+- emit progress events
+- manage checkpoints and resume logic
+- export MP3/M4B through `ffmpeg`
 
-**Why direct ffmpeg?** pydub creates intermediate WAV files with a 4GB limit (~24.9 hours). Long audiobooks exceed this.
+### Pipeline modes
 
-### Output Formats
-- **MP3** (default): Standard audio format with configurable bitrate (128k/192k/320k)
-- **M4B**: Audiobook format with embedded chapter markers, book metadata (title/author), and cover art
+- `sequential`: default for most paths, required for checkpointed runs and M4B
+- `overlap3`: optimized MP3 path (no checkpoints) using threaded inference/conversion queues
 
-### Audio Quality Options
-- `--bitrate` - Audio bitrate: `128k` (smaller), `192k` (default), `320k` (high quality)
-- `--normalize` - Apply -14 LUFS loudness normalization (podcast standard)
+`app.py` will warn and fall back to sequential if `--pipeline_mode overlap3` is requested for unsupported combinations.
 
-### Metadata Override (M4B)
-- `--extract_metadata` - Print EPUB metadata and exit
-- `--title` / `--author` / `--cover` - Override extracted metadata
+### Export paths
 
-### IPC Protocol
-Python outputs to stdout, parsed by `tts-runner.ts`:
-```
-PHASE:PARSING              # Before text extraction
-PHASE:INFERENCE            # Before inference loop
-PHASE:CONCATENATING        # Before np.concatenate()
-PHASE:EXPORTING            # Before MP3/M4B export
-METADATA:total_chars:N     # Character count
-METADATA:chapter_count:N   # Number of chapters
-METADATA:title:<title>     # Extracted book title
-METADATA:author:<author>   # Extracted author
-METADATA:has_cover:<bool>  # Cover image presence
-WORKER:0:INFER:Chunk X/Y   # Per-chunk status
-TIMING:chunk_idx:ms        # Per-chunk timing
-HEARTBEAT:timestamp        # Every 5 seconds
-PROGRESS:N/M chunks        # Overall progress
-CHECKPOINT:FOUND:T:C       # Checkpoint found (total:completed)
-CHECKPOINT:RESUMING:N      # Resuming from N completed chunks
-CHECKPOINT:SAVED:idx       # Chunk saved to checkpoint
-CHECKPOINT:CLEANED         # Checkpoint cleaned up
-```
+Runtime export is `ffmpeg`-based (direct subprocess invocation):
+- MP3 can stream PCM directly to an `ffmpeg` subprocess when checkpoints are off
+- MP3 and M4B can also use a temporary PCM spool file path
+- M4B export writes chapter metadata and optional cover art via ffmetadata + `ffmpeg`
 
-### MPS Environment Variables (PyTorch backend only)
-When MPS is enabled, `tts-runner.ts` sets:
-- `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0` - Aggressive memory cleanup
-- `OMP_NUM_THREADS=4` / `OPENBLAS_NUM_THREADS=2` - Reduce GIL contention
+Do not document runtime export as `pydub`-driven.
 
-## Key Dependencies
+## Backend Flags Worth Knowing
 
-- **Python**: kokoro (TTS), ebooklib (EPUB), torch, numpy, mlx-audio (optional)
-- **Node.js**: react, ink (terminal UI), commander (CLI args)
-- **System**: FFmpeg (required), Python 3.10-3.12
+Frequently changed / easy to drift:
+- `--backend`, `--format`, `--bitrate`, `--normalize`
+- `--checkpoint`, `--resume`, `--check_checkpoint`
+- `--pipeline_mode`, `--prefetch_chunks`, `--pcm_queue_size`
+- `--event_format`, `--log_file`
+- `--title`, `--author`, `--cover`
+- `--extract_metadata`
 
-## Voice Options
+Notes:
+- `--workers` is currently a compatibility flag; inference remains sequential.
+- `--no_checkpoint` is deprecated and currently a no-op (checkpointing is opt-in).
 
-Voices are filtered by accent (`--lang_code`):
-- **American (a)**: `af_heart` (default), `af_bella`, `af_nicole`, `af_sarah`, `af_sky`, `am_adam`, `am_michael`
-- **British (b)**: `bf_emma`, `bf_isabella`, `bm_george`, `bm_lewis`
+## IPC Protocol (CLI <-> Python)
+
+Backend event categories include:
+- `phase`, `metadata`, `timing`, `heartbeat`, `worker`, `progress`, `checkpoint`, `error`, `done`
+- `log` (JSON mode only; emitted by backend `info()` / `warn()` helpers)
+
+The CLI runner (`cli/src/utils/tts-runner.ts`):
+- always passes `--event_format json`
+- writes backend logs to a timestamped file (`~/.audiobook-maker/logs` or repo `.logs` fallback)
+- parses JSON first, then legacy text lines as fallback
+
+Legacy text parsing is still used directly by helper utilities like:
+- `cli/src/utils/metadata.ts`
+- `cli/src/utils/checkpoint.ts`
+
+## Environment Variables (CLI Runner / Local Dev)
+
+Recognized or relevant variables:
+- `AUDIOBOOK_PYTHON`: preferred Python executable for CLI subprocesses
+- `PYTHON`: secondary Python override candidate
+- `AUDIOBOOK_VERBOSE=1`: echo parsed backend output lines to CLI stderr
+- `AUDIOBOOK_OMP_THREADS`: override derived `OMP_NUM_THREADS`
+- `AUDIOBOOK_OPENBLAS_THREADS`: override derived `OPENBLAS_NUM_THREADS`
+
+When using PyTorch + MPS path, the CLI runner may set:
+- `PYTORCH_ENABLE_MPS_FALLBACK=1`
+- `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0`
+- `OMP_NUM_THREADS=<derived>`
+- `OPENBLAS_NUM_THREADS=<derived>`
+
+## Contributor Checklist For Behavior Changes
+
+If you change any of the following, update docs in the same PR:
+- backend flags or defaults
+- checkpoint validation rules or event codes
+- output format behavior (MP3/M4B, metadata, cover handling)
+- CLI workflow screens or config wizard steps
+- IPC event payloads or parsing semantics
+
+Minimum docs to review per change:
+- `README.md`
+- `ARCHITECTURE.md`
+- `CHECKPOINTS.md` and/or `FORMATS_AND_METADATA.md`
