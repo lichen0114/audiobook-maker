@@ -82,6 +82,8 @@ echo "==> [4/8] installing the MLX runtime into the bundle (no torch)"
 "$PYBIN" -m pip install -r "$REQ" imageio-ffmpeg
 # Belt-and-suspenders: the phonemizer's transformer path is optional; drop torch.
 "$PYBIN" -m pip uninstall -y torch curated-transformers spacy-curated-transformers curated-tokenizers >/dev/null 2>&1 || true
+# Patch the Kokoro istftnet length-drift crash (broadcast_shapes on certain chunks).
+"$PYBIN" "$DESKTOP/packaging/patch_mlx.py" "$RES/python/lib/python${PY_SERIES}/site-packages"
 
 echo "==> [5/8] bundling ffmpeg"
 if [ -n "${FFMPEG_SRC:-}" ]; then
