@@ -175,16 +175,19 @@ pub const Model = struct {
     // resolved runtime (filled by the boot detection script)
     py_ok: bool = false,
     low_mem: bool = false,
+    bundled: bool = false, // running inside a packaged .app (MLX-only)
     python: Str(1024) = .{},
     app_py: Str(1024) = .{},
     root: Str(1024) = .{},
+    res_dir: Str(1024) = .{}, // <App>.app/Contents/Resources when bundled
 
     pub const view_unbound = .{
-        "python",      "py_ok",      "low_mem",     "app_py",
-        "root",        "started_ms", "active",      "total_ms",
-        "inspect_in_flight",         "check_count", "book_count",
-        "voice_index", "speed_index", "checks",     "books",
-        "cfg",         "path_buf",   "screen",      "selected",
+        "python",      "py_ok",      "low_mem",     "bundled",
+        "app_py",      "root",       "res_dir",     "started_ms",
+        "active",      "total_ms",   "inspect_in_flight",
+        "check_count", "book_count", "voice_index", "speed_index",
+        "checks",      "books",      "cfg",         "path_buf",
+        "screen",      "selected",
     };
 
     // ---- derived screen predicates (markup <if> bindings) ----
@@ -374,6 +377,10 @@ pub const Model = struct {
     pub fn showGpu(self: *const Model) bool {
         return self.cfg.backend != .mlx;
     }
+    /// A packaged .app ships MLX only, so the backend picker is hidden there.
+    pub fn showBackend(self: *const Model) bool {
+        return !self.bundled;
+    }
 
     // ---- done screen ----
     pub fn doneSummary(self: *const Model, arena: std.mem.Allocator) []const u8 {
@@ -488,10 +495,43 @@ pub fn initialModel() Model {
     return .{};
 }
 
+/// Read an environment variable as a slice (libc-backed; the app links libc).
+fn getenvSlice(name: [*:0]const u8) ?[]const u8 {
+    const v = std.c.getenv(name) orelse return null;
+    const s = std.mem.span(v);
+    return if (s.len == 0) null else s;
+}
+
 fn boot(model: *Model, fx: *Effects) void {
     model.cfg.use_mps = apple_host.defaultUseMps();
-    model.screen = .checking;
+    detectBundle(model);
+    // Open-with-file seam: launch with a book already loaded (also the
+    // deterministic entry point for automated end-to-end tests).
+    if (getenvSlice("AUDIOBOOK_ADD_EPUB")) |p| {
+        if (std.ascii.endsWithIgnoreCase(p, ".epub")) addBook(model, p);
+    }
+    model.screen = .checking; // stays here until detection resolves
     startDetect(model, fx);
+}
+
+// dyld gives us the executable path without argv (removed in std 0.16).
+extern "c" fn _NSGetExecutablePath(buf: [*c]u8, bufsize: *u32) c_int;
+
+/// When launched from inside `<App>.app/Contents/MacOS/<bin>`, derive the
+/// sibling `Resources/` dir that holds the embedded Python + backend + ffmpeg.
+fn detectBundle(model: *Model) void {
+    var path_buf: [1024]u8 = undefined;
+    var size: u32 = @intCast(path_buf.len);
+    const rc = _NSGetExecutablePath(&path_buf, &size);
+    if (rc != 0) return;
+    const a0 = std.mem.sliceTo(&path_buf, 0);
+    const marker = "/Contents/MacOS/";
+    const i = std.mem.indexOf(u8, a0, marker) orelse return;
+    var res_buf: [1024]u8 = undefined;
+    const res = std.fmt.bufPrint(&res_buf, "{s}/Contents/Resources", .{a0[0..i]}) catch return;
+    model.res_dir.set(res);
+    model.bundled = true;
+    model.cfg.backend = .mlx; // packaged app ships the MLX runtime only
 }
 
 pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
@@ -601,7 +641,7 @@ fn onLine(model: *Model, line: native_sdk.EffectLine) void {
 
 fn onExit(model: *Model, exit: native_sdk.EffectExit, fx: *Effects) void {
     if (exit.key == KEY_DETECT) {
-        applyDetect(model, exit.output);
+        applyDetect(model, exit.output, fx);
         return;
     }
     if (exit.key == KEY_PANEL or exit.key == KEY_LSDIR) {
@@ -788,33 +828,44 @@ fn removeSelected(model: *Model, fx: *Effects) void {
 // ------------------------------------------------------------- effect spawns
 
 // One boot script does everything the Zig side can't (fs walks are behind
-// std.Io now): find the project root, pick the interpreter, read hw.memsize,
-// and run the Python preflight — emitting a single JSON line.
+// std.Io now): prefer the bundled Resources ($1) when packaged, else find the
+// project root by walking up; pick the interpreter; read hw.memsize; run the
+// Python preflight — emitting a single JSON line.
 const DETECT_SCRIPT =
-    "d=\"${AUDIOBOOK_PROJECT_ROOT:-$PWD}\"\n" ++
-    "root=\"\"\n" ++
-    "while [ -n \"$d\" ] && [ \"$d\" != \"/\" ]; do\n" ++
-    "  if [ -f \"$d/app.py\" ] && [ -d \"$d/audiobook_backend\" ]; then root=\"$d\"; break; fi\n" ++
-    "  d=$(dirname \"$d\")\n" ++
-    "done\n" ++
-    "py=python3\n" ++
-    "if [ -n \"$AUDIOBOOK_PYTHON\" ] && [ -x \"$AUDIOBOOK_PYTHON\" ]; then py=\"$AUDIOBOOK_PYTHON\";\n" ++
-    "elif [ -n \"$PYTHON\" ] && [ -x \"$PYTHON\" ]; then py=\"$PYTHON\";\n" ++
-    "elif [ -n \"$root\" ] && [ -x \"$root/.venv/bin/python\" ]; then py=\"$root/.venv/bin/python\"; fi\n" ++
+    "res=\"$1\"\n" ++
+    "root=\"\"; py=\"\"\n" ++
+    "if [ -n \"$res\" ] && [ -f \"$res/backend/app.py\" ]; then\n" ++
+    "  root=\"$res/backend\"\n" ++
+    "  [ -x \"$res/python/bin/python3\" ] && py=\"$res/python/bin/python3\"\n" ++
+    "  export PATH=\"$res:$PATH\"\n" ++
+    "fi\n" ++
+    "if [ -z \"$root\" ]; then\n" ++
+    "  d=\"${AUDIOBOOK_PROJECT_ROOT:-$PWD}\"\n" ++
+    "  while [ -n \"$d\" ] && [ \"$d\" != \"/\" ]; do\n" ++
+    "    if [ -f \"$d/app.py\" ] && [ -d \"$d/audiobook_backend\" ]; then root=\"$d\"; break; fi\n" ++
+    "    d=$(dirname \"$d\")\n" ++
+    "  done\n" ++
+    "fi\n" ++
+    "if [ -z \"$py\" ]; then\n" ++
+    "  py=python3\n" ++
+    "  if [ -n \"$AUDIOBOOK_PYTHON\" ] && [ -x \"$AUDIOBOOK_PYTHON\" ]; then py=\"$AUDIOBOOK_PYTHON\";\n" ++
+    "  elif [ -n \"$PYTHON\" ] && [ -x \"$PYTHON\" ]; then py=\"$PYTHON\";\n" ++
+    "  elif [ -n \"$root\" ] && [ -x \"$root/.venv/bin/python\" ]; then py=\"$root/.venv/bin/python\"; fi\n" ++
+    "fi\n" ++
     "mem=$(sysctl -n hw.memsize 2>/dev/null || echo 0)\n" ++
-    "\"$py\" - \"$root\" \"$py\" \"$mem\" <<'PY'\n" ++
+    "\"$py\" - \"$root\" \"$py\" \"$mem\" \"$res\" <<'PY'\n" ++
     "import json,sys,shutil,importlib.util as u\n" ++
     "def s(m):\n" ++
     "  try: return u.find_spec(m) is not None\n" ++
     "  except Exception: return False\n" ++
-    "print(json.dumps({'root':sys.argv[1],'python':sys.argv[2],'mem':int(sys.argv[3] or 0)," ++
+    "root,py,mem,res=sys.argv[1],sys.argv[2],int(sys.argv[3] or 0),sys.argv[4]\n" ++
+    "print(json.dumps({'root':root,'python':py,'mem':mem,'bundled':bool(res)," ++
     "'version':'%d.%d.%d'%sys.version_info[:3],'kokoro':s('kokoro'),'mlx':s('mlx_audio')," ++
-    "'ffmpeg':shutil.which('ffmpeg') or ''}))\n" ++
+    "'misaki':s('misaki'),'ffmpeg':shutil.which('ffmpeg') or ''}))\n" ++
     "PY\n";
 
 fn startDetect(model: *Model, fx: *Effects) void {
-    _ = model;
-    var argv = [_][]const u8{ "/bin/sh", "-c", DETECT_SCRIPT };
+    var argv = [_][]const u8{ "/bin/sh", "-c", DETECT_SCRIPT, "sh", model.res_dir.slice() };
     fx.spawn(.{
         .key = KEY_DETECT,
         .argv = argv[0..],
@@ -823,14 +874,19 @@ fn startDetect(model: *Model, fx: *Effects) void {
     });
 }
 
-fn applyDetect(model: *Model, output: []const u8) void {
+fn applyDetect(model: *Model, output: []const u8, fx: *Effects) void {
     var py_ver: []const u8 = "";
     var kokoro = false;
+    var mlx = false;
+    var misaki = false;
+    var bundled = false;
     var ffmpeg: []const u8 = "";
     var root: []const u8 = "";
     var python: []const u8 = "";
     var mem: u64 = 0;
-    var scratch: [4096]u8 = undefined;
+    // Bundled paths are long absolute paths; the parsed JSON Value needs
+    // headroom well beyond the raw bytes.
+    var scratch: [32 * 1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
 
     var it = std.mem.splitScalar(u8, output, '\n');
@@ -852,6 +908,15 @@ fn applyDetect(model: *Model, output: []const u8) void {
         if (o.get("kokoro")) |v| {
             if (v == .bool) kokoro = v.bool;
         }
+        if (o.get("mlx")) |v| {
+            if (v == .bool) mlx = v.bool;
+        }
+        if (o.get("misaki")) |v| {
+            if (v == .bool) misaki = v.bool;
+        }
+        if (o.get("bundled")) |v| {
+            if (v == .bool) bundled = v.bool;
+        }
         if (o.get("ffmpeg")) |v| {
             if (v == .string) ffmpeg = v.string;
         }
@@ -862,6 +927,7 @@ fn applyDetect(model: *Model, output: []const u8) void {
     }
 
     model.py_ok = root.len > 0;
+    model.bundled = bundled;
     if (model.py_ok) {
         model.root.set(root);
         model.python.set(python);
@@ -869,20 +935,28 @@ fn applyDetect(model: *Model, output: []const u8) void {
         model.app_py.set(std.fmt.bufPrint(&app_buf, "{s}/app.py", .{root}) catch "");
     }
     model.low_mem = mem > 0 and mem <= 8 * 1024 * 1024 * 1024;
-    if (model.low_mem) model.cfg.use_mps = false;
+    if (model.low_mem and !bundled) model.cfg.use_mps = false;
 
     model.check_count = 0;
-    addCheck(model, "Backend script", model.py_ok, if (model.py_ok) "app.py located" else "app.py not found near this app", "Run from the audiobook_maker project, or set AUDIOBOOK_PROJECT_ROOT");
+    addCheck(model, "Backend", model.py_ok, if (model.py_ok) "backend located" else "backend not found", if (bundled) "The app bundle looks incomplete — reinstall it" else "Run from the audiobook_maker project, or set AUDIOBOOK_PROJECT_ROOT");
     const py_ok = pythonVersionOk(py_ver);
     addCheck(model, "Python 3.10-3.12", py_ok, if (py_ok) py_ver else "Compatible Python not found", "./setup.sh");
-    addCheck(model, "Kokoro TTS", kokoro, if (kokoro) "installed" else "not installed", "pip install -r requirements.txt");
-    addCheck(model, "FFmpeg", ffmpeg.len > 0, if (ffmpeg.len > 0) "installed" else "not found on PATH", "brew install ffmpeg");
+    if (bundled) {
+        const engine_ok = mlx and misaki;
+        addCheck(model, "Voice engine (MLX)", engine_ok, if (engine_ok) "MLX ready" else "MLX runtime missing", "The app bundle looks incomplete — reinstall it");
+    } else {
+        addCheck(model, "Kokoro TTS", kokoro, if (kokoro) "installed" else "not installed", "pip install -r requirements.txt");
+    }
+    addCheck(model, "FFmpeg", ffmpeg.len > 0, if (ffmpeg.len > 0) "installed" else "not found on PATH", if (bundled) "The app bundle looks incomplete — reinstall it" else "brew install ffmpeg");
 
     var all_ok = true;
     for (0..model.check_count) |i| {
         if (!model.checks[i].ok) all_ok = false;
     }
     model.screen = if (all_ok) .library else .setup;
+    // Runtime is known now — inspect any book pre-loaded via the open-with-file
+    // seam (or added while detection was still running).
+    if (model.screen == .library) ensureInspecting(model, fx);
 }
 
 fn pythonVersionOk(ver: []const u8) bool {
@@ -980,6 +1054,7 @@ fn spawnBackend(model: *Model, idx: usize, mode: config.RunMode, fx: *Effects) v
     var fba = std.heap.FixedBufferAllocator.init(&arg_scratch);
 
     var run_cfg = model.cfg;
+    if (model.bundled) run_cfg.backend = .mlx; // packaged app is MLX-only
     if (mode == .convert and b.status == .converting) {
         if (b.resume_choice and b.ckpt_completed > 0) run_cfg.resume_requested = true;
     }
@@ -1003,6 +1078,16 @@ fn spawnBackend(model: *Model, idx: usize, mode: config.RunMode, fx: *Effects) v
         c.raw("cd ");
         c.quoted(model.root.slice());
         c.raw("; ");
+    }
+    if (model.bundled and model.res_dir.len > 0) {
+        // Put the bundled ffmpeg (in Resources/) ahead on PATH, and expose the
+        // relocated libpcaudio (at the Resources root) to the espeak library
+        // that phonemizer copies into a temp dir at runtime.
+        c.raw("PATH=\"");
+        c.raw(model.res_dir.slice());
+        c.raw(":$PATH\" DYLD_LIBRARY_PATH=\"");
+        c.raw(model.res_dir.slice());
+        c.raw("\" ");
     }
     c.raw("PYTHONUNBUFFERED=1 ");
     if (run_cfg.backend != .mlx and run_cfg.backend != .mock) {

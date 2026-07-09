@@ -2,9 +2,18 @@
 
 Convert EPUB books into MP3 or M4B audiobooks using Kokoro TTS.
 
-The repository has two main parts:
+The repository has three main parts:
 - `cli/`: an interactive terminal UI built with Ink, React, and TypeScript
+- `desktop/`: a native macOS app (Zig + the Native SDK) that drives the same backend
 - `app.py`: the Python backend that parses EPUBs, runs TTS, manages checkpoints, and exports audio with `ffmpeg`
+
+## Desktop app (macOS)
+
+A double-click Mac app is available on the [Releases page](../../releases): download
+**AudiobookMaker.dmg**, drag it to Applications, and open it — no Python, ffmpeg, or setup
+required (everything is bundled; the first conversion downloads the ~330 MB voice model).
+Apple Silicon only; it's an unsigned build, so on first launch right-click the app → Open.
+See [`desktop/README.md`](desktop/README.md) to build it yourself.
 
 ## Documentation
 

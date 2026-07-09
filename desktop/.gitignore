@@ -1,3 +1,5 @@
 .native/
 zig-out/
 .zig-cache/
+dist/
+packaging/work/

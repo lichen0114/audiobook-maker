@@ -150,14 +150,16 @@
               </toggle-group>
               <switch checked="{cfgNormalize}" on-change="toggle_normalize">Normalize</switch>
             </row>
-            <row gap="12" cross="center">
-              <text width="92" foreground="text_muted">Backend</text>
-              <toggle-group gap="2">
-                <toggle-button selected="{beAuto}" on-toggle="set_auto">Auto</toggle-button>
-                <toggle-button selected="{bePytorch}" on-toggle="set_pytorch">PyTorch</toggle-button>
-                <toggle-button selected="{beMlx}" on-toggle="set_mlx">MLX</toggle-button>
-              </toggle-group>
-            </row>
+            <if test="{showBackend}">
+              <row gap="12" cross="center">
+                <text width="92" foreground="text_muted">Backend</text>
+                <toggle-group gap="2">
+                  <toggle-button selected="{beAuto}" on-toggle="set_auto">Auto</toggle-button>
+                  <toggle-button selected="{bePytorch}" on-toggle="set_pytorch">PyTorch</toggle-button>
+                  <toggle-button selected="{beMlx}" on-toggle="set_mlx">MLX</toggle-button>
+                </toggle-group>
+              </row>
+            </if>
             <row gap="18" cross="center">
               <if test="{showGpu}">
                 <switch checked="{cfgGpu}" on-change="toggle_gpu">Apple GPU (MPS)</switch>

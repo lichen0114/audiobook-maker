@@ -119,9 +119,11 @@ pub const TtsConfig = struct {
     cover: []const u8 = "",
 
     /// The `--device` argument, mirroring resolvePythonDeviceArg + apple-host.
+    /// Note: app.py's --device only accepts auto|cpu|mps (it maps mlx/mock
+    /// internally), so mlx passes "auto", not "mlx".
     pub fn deviceArg(self: TtsConfig, is_apple_silicon: bool, low_memory: bool) []const u8 {
         return switch (self.backend) {
-            .mlx => "mlx",
+            .mlx => "auto",
             .mock => "cpu",
             .auto, .pytorch => blk: {
                 if (!is_apple_silicon) break :blk "auto";
@@ -261,6 +263,13 @@ test "buildArgs: m4b inspect omits log + checkpoint, keeps metadata" {
     try std.testing.expect(hasPair(args, "--device", "cpu")); // mock => cpu
     try std.testing.expect(!hasFlag(args, "--checkpoint")); // inspect never checkpoints
     try std.testing.expect(!hasFlag(args, "--log_file")); // log only on convert
+}
+
+test "deviceArg: mlx maps to auto (app.py --device rejects 'mlx')" {
+    try std.testing.expectEqualStrings("auto", (TtsConfig{ .backend = .mlx }).deviceArg(true, false));
+    try std.testing.expectEqualStrings("cpu", (TtsConfig{ .backend = .mock }).deviceArg(true, false));
+    try std.testing.expectEqualStrings("mps", (TtsConfig{ .backend = .pytorch, .use_mps = true }).deviceArg(true, false));
+    try std.testing.expectEqualStrings("cpu", (TtsConfig{ .backend = .pytorch, .use_mps = true }).deviceArg(true, true)); // low-mem
 }
 
 fn hasFlag(args: []const []const u8, flag: []const u8) bool {

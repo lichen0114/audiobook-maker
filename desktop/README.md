@@ -35,6 +35,30 @@ Module map (Zig ports of the CLI's TypeScript utils):
 | `apple_host.zig` | `apple-host.ts` | Apple-Silicon detection |
 | `main.zig` | `App.tsx` + `batch-planner/scheduler/preflight` | TEA model, effects, views |
 
+## Download (for users)
+
+Grab **AudiobookMaker.dmg** from the [Releases page](../../releases), open it, and
+drag the app into Applications. Apple Silicon (M1 or newer) only.
+
+It's an unsigned build, so on first launch macOS Gatekeeper will warn — **right-click
+the app → Open** once (or run `xattr -dr com.apple.quarantine "/Applications/AudiobookMaker.app"`).
+The first conversion downloads the ~330 MB Kokoro voice model; after that it works offline.
+
+Nothing else to install — Python, the MLX voice runtime, and ffmpeg are all inside the app.
+
+## Build the .app yourself
+
+```sh
+brew install espeak-ng          # relocated into the bundle by the packager
+desktop/packaging/package.sh     # -> desktop/dist/AudiobookMaker.dmg (~350 MB)
+```
+
+`package.sh` builds the native binary, downloads a relocatable Python
+(python-build-standalone), installs the MLX runtime (`packaging/requirements-mlx-app.txt`,
+torch-free), bundles a static ffmpeg + a relocated espeak-ng, copies the Python
+backend, ad-hoc signs, and produces the DMG. CI does the same on every `v*` tag
+(`.github/workflows/release.yml`).
+
 ## Commands
 
 ```sh
@@ -63,10 +87,10 @@ install if the Python venv, Kokoro, or FFmpeg are missing (`../setup.sh`).
   from the backend's JSON events; native completion notification + Reveal in Finder.
 - Checkpoint **resume / start-fresh** choice; duplicate-output **blocking**.
 
-Verified: 15/15 Zig tests; the `app.py` contract exercised with the `mock`
-backend (inspection JSON + a full conversion → valid MP3); and a live headless
-run via the automation harness (boots, detects runtime, renders the Setup
-screen with correct check results).
+Verified end-to-end: 16/16 Zig tests; the real backends drive a full conversion
+(PyTorch and MLX, MP3 + M4B with chapters); the packaged `.app` runs completely
+self-contained (its own Python + MLX + espeak + ffmpeg, no repo, no system deps)
+and produces a valid MP3 when driven through its GUI via the automation harness.
 
 ## Deferred (documented, not yet built)
 
@@ -78,6 +102,9 @@ screen with correct check results).
 - **Inline M4B title/author overrides** — chapters + metadata already flow from
   the EPUB; editable override fields are not built (would add per-book
   `TextBuffer`s).
-- **Packaging/distribution** — `native package` produces the `.app`, but it
-  still relies on an existing project `.venv` (like the CLI). Bundling a
-  relocatable Python + models + ffmpeg, plus notarization/DMG, is future work.
+- **Notarization** — the DMG is ad-hoc signed (Gatekeeper right-click-Open on
+  first launch). A Developer ID + `xcrun notarytool` step would make it open
+  cleanly; wire it into `.github/workflows/release.yml` when an account exists.
+- **First-run model download UX** — the first conversion silently downloads the
+  ~330 MB voice model (appears to sit at "Generating speech"); a dedicated
+  "Preparing…" state would be friendlier.
