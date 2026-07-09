@@ -64,13 +64,10 @@ PLIST
 
 echo "==> [3/8] fetching a relocatable Python ($PY_SERIES)"
 mkdir -p "$WORK"
-if [ -z "${PY_URL:-}" ]; then
-  # browser_download_url percent-encodes the '+', so match loosely.
-  PY_URL=$(curl -fsSL https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest \
-    | grep -oE "https://[^\"]*cpython-${PY_SERIES}\.[0-9][^\"]*aarch64-apple-darwin-install_only\.tar\.gz" \
-    | head -1)
-fi
-[ -n "$PY_URL" ] || { echo "could not resolve python-build-standalone URL; set PY_URL"; exit 1; }
+# Pinned for reproducibility and to avoid the unauthenticated GitHub API rate
+# limit (curl 403) that the "resolve latest release" call hits on CI runners.
+# Override with PY_URL to bump the Python build.
+PY_URL="${PY_URL:-https://github.com/astral-sh/python-build-standalone/releases/download/20260623/cpython-3.12.13%2B20260623-aarch64-apple-darwin-install_only.tar.gz}"
 echo "    $PY_URL"
 curl -fsSL "$PY_URL" -o "$WORK/python.tar.gz"
 tar -xzf "$WORK/python.tar.gz" -C "$RES"    # -> $RES/python/
