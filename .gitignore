@@ -10,3 +10,27 @@ node_modules/
 cli/node_modules/
 cli/dist/
 .package-lock.json
+
+# Python / test artifacts
+# .venv*/ covers .venv and the .venv-mlx build env
+.venv*/
+.coverage*
+coverage/
+cli/coverage/
+htmlcov/
+
+# Audio outputs
+*.m4b
+
+# Logs
+.logs/
+*.log
+
+# Zig / Native SDK build output
+zig-out/
+.zig-cache/
+.native/
+
+# Packaged app
+dist/
+*.dmg
