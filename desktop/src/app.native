@@ -1,0 +1,214 @@
+<!-- Audiobook Maker — the whole view. Logic lives in main.zig (Model/Msg/
+     update). Validate with: native markup check src/app.native -->
+<column grow="1">
+
+  <!-- ============================ CHECKING ============================ -->
+  <if test="{isChecking}">
+    <column grow="1" main="center" cross="center" gap="12" padding="24">
+      <spinner/>
+      <text foreground="text_muted">Checking dependencies…</text>
+    </column>
+  </if>
+
+  <!-- ============================= SETUP ============================== -->
+  <if test="{isSetup}">
+    <column grow="1" gap="16" padding="28">
+      <text size="heading">Setup required</text>
+      <text foreground="text_muted">Install the missing pieces below, then re-check.</text>
+      <column gap="8">
+        <for each="checkRows" key="name" as="c">
+          <row gap="10" cross="center" background="surface" radius="md" padding="12">
+            <if test="{c.ok}"><icon name="check-circle" foreground="success"/></if>
+            <else><icon name="x-circle" foreground="destructive"/></else>
+            <column grow="1" gap="2">
+              <text>{c.name}</text>
+              <text foreground="text_muted">{c.message}</text>
+              <if test="{c.bad}"><text foreground="warning">{c.fix}</text></if>
+            </column>
+          </row>
+        </for>
+      </column>
+      <row gap="8">
+        <button variant="primary" icon="refresh-cw" on-press="retry_checks">Re-check</button>
+      </row>
+    </column>
+  </if>
+
+  <!-- ============================ LIBRARY ============================= -->
+  <if test="{isLibrary}">
+    <column grow="1">
+
+      <!-- toolbar -->
+      <row gap="12" cross="center" padding="14" background="surface">
+        <text size="heading" grow="1">Audiobook Maker</text>
+        <button variant="secondary" icon="plus" on-press="add_books">Add Books</button>
+        <if test="{converting}">
+          <button variant="destructive" icon="x" on-press="cancel_convert">Cancel</button>
+        </if>
+        <else>
+          <if test="{canConvert}">
+            <button variant="primary" icon="play" on-press="convert_all">Convert All</button>
+          </if>
+          <else>
+            <button variant="primary" disabled="true">Convert All</button>
+          </else>
+        </else>
+      </row>
+
+      <!-- body -->
+      <row grow="1">
+
+        <!-- sidebar -->
+        <column width="304" gap="8" padding="12" background="surface_subtle">
+          <input grow="1" placeholder="Paste an .epub path, press Enter"
+                 text="{pathDraft}" on-input="path_edit" on-submit="add_path"/>
+          <if test="{hasBooks}">
+            <scroll grow="1">
+              <column gap="2">
+                <for each="bookRows" key="index" as="b">
+                  <row gap="6" cross="center" padding="6" on-press="select_book:{b.index}">
+                    <if test="{b.selected}"><icon name="chevron-right" foreground="accent"/></if>
+                    <else><spacer width="16"/></else>
+                    <column grow="1" gap="1">
+                      <text>{b.title}</text>
+                      <text foreground="text_muted">{b.subtitle}</text>
+                      <text foreground="text_muted">{b.status}</text>
+                      <if test="{b.converting}"><progress value="{b.pct}"/></if>
+                    </column>
+                  </row>
+                </for>
+              </column>
+            </scroll>
+          </if>
+          <else>
+            <column grow="1" main="center" cross="center" gap="8" padding="16">
+              <icon name="folder-open" foreground="text_muted"/>
+              <text foreground="text_muted">No books yet</text>
+            </column>
+          </else>
+        </column>
+
+        <separator/>
+
+        <!-- detail -->
+        <column grow="1" gap="16" padding="22">
+          <if test="{selValid}">
+
+            <row gap="18" cross="start">
+              <column width="92" height="126" background="surface" radius="md" main="center" cross="center">
+                <icon name="file-text" foreground="text_muted"/>
+              </column>
+              <column grow="1" gap="4">
+                <text size="heading">{selTitle}</text>
+                <text foreground="text_muted">{selAuthor}</text>
+                <text foreground="text_muted">{selMeta}</text>
+                <text foreground="text_muted">{selStatus}</text>
+                <if test="{selConverting}"><progress value="{selPct}"/></if>
+              </column>
+            </row>
+
+            <if test="{selHasError}">
+              <row gap="8" cross="center" background="surface" radius="md" padding="12">
+                <icon name="alert" foreground="destructive"/>
+                <text foreground="destructive">{selError}</text>
+              </row>
+            </if>
+
+            <if test="{selResumable}">
+              <column gap="8" background="surface" radius="md" padding="12">
+                <text>{selCkpt}</text>
+                <switch checked="{selResumeChosen}" on-change="toggle_resume">Resume from checkpoint</switch>
+              </column>
+            </if>
+
+            <separator/>
+
+            <text size="heading">Settings</text>
+
+            <row gap="12" cross="center">
+              <text width="92" foreground="text_muted">Voice</text>
+              <button variant="secondary" on-press="cycle_voice">{voiceLabel}</button>
+              <text foreground="text_muted">{accentLabel}</text>
+            </row>
+            <row gap="12" cross="center">
+              <text width="92" foreground="text_muted">Speed</text>
+              <button variant="secondary" on-press="cycle_speed">{speedLabel}</button>
+            </row>
+            <row gap="12" cross="center">
+              <text width="92" foreground="text_muted">Format</text>
+              <toggle-group gap="2">
+                <toggle-button selected="{isMp3}" on-toggle="set_mp3">MP3</toggle-button>
+                <toggle-button selected="{isM4b}" on-toggle="set_m4b">M4B</toggle-button>
+              </toggle-group>
+            </row>
+            <row gap="12" cross="center">
+              <text width="92" foreground="text_muted">Quality</text>
+              <toggle-group gap="2">
+                <toggle-button selected="{br128}" on-toggle="set_br128">128k</toggle-button>
+                <toggle-button selected="{br192}" on-toggle="set_br192">192k</toggle-button>
+                <toggle-button selected="{br320}" on-toggle="set_br320">320k</toggle-button>
+              </toggle-group>
+              <switch checked="{cfgNormalize}" on-change="toggle_normalize">Normalize</switch>
+            </row>
+            <row gap="12" cross="center">
+              <text width="92" foreground="text_muted">Backend</text>
+              <toggle-group gap="2">
+                <toggle-button selected="{beAuto}" on-toggle="set_auto">Auto</toggle-button>
+                <toggle-button selected="{bePytorch}" on-toggle="set_pytorch">PyTorch</toggle-button>
+                <toggle-button selected="{beMlx}" on-toggle="set_mlx">MLX</toggle-button>
+              </toggle-group>
+            </row>
+            <row gap="18" cross="center">
+              <if test="{showGpu}">
+                <switch checked="{cfgGpu}" on-change="toggle_gpu">Apple GPU (MPS)</switch>
+              </if>
+              <switch checked="{cfgCheckpoint}" on-change="toggle_checkpoint">Checkpoint</switch>
+            </row>
+
+            <spacer grow="1"/>
+            <row gap="8">
+              <button variant="ghost" icon="trash" on-press="remove_selected">Remove</button>
+            </row>
+
+          </if>
+          <else>
+            <column grow="1" main="center" cross="center">
+              <text foreground="text_muted">Select a book to configure it</text>
+            </column>
+          </else>
+        </column>
+      </row>
+
+      <status-bar>{statusText}</status-bar>
+    </column>
+  </if>
+
+  <!-- ============================== DONE ============================== -->
+  <if test="{isDone}">
+    <column grow="1" gap="16" padding="28">
+      <row gap="10" cross="center">
+        <icon name="check-circle" foreground="success"/>
+        <text size="heading">Batch complete</text>
+      </row>
+      <text foreground="text_muted">{doneSummary}</text>
+      <column gap="6">
+        <for each="bookRows" key="index" as="b">
+          <row gap="8" cross="center" background="surface" radius="md" padding="10"
+               on-press="select_book:{b.index}">
+            <if test="{b.failed}"><icon name="x-circle" foreground="destructive"/></if>
+            <else><icon name="check" foreground="success"/></else>
+            <column grow="1" gap="1">
+              <text>{b.title}</text>
+              <text foreground="text_muted">{b.status}</text>
+            </column>
+          </row>
+        </for>
+      </column>
+      <row gap="8">
+        <button variant="primary" icon="folder-open" on-press="reveal_output">Reveal in Finder</button>
+        <button variant="secondary" icon="plus" on-press="new_batch">New Batch</button>
+      </row>
+    </column>
+  </if>
+
+</column>
