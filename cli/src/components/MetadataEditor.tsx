@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import SelectInput from 'ink-select-input';
 import TextInput from 'ink-text-input';
+import { useTextEntryFocus } from '../contexts/text-entry.js';
 
 export interface BookMetadata {
     title: string;
@@ -30,6 +31,8 @@ export function MetadataEditor({ metadata, onConfirm, onBack }: MetadataEditorPr
     const [coverMode, setCoverMode] = useState<CoverMode>(
         metadata.coverPath ? 'custom' : metadata.hasCover ? 'epub' : 'none',
     );
+
+    useTextEntryFocus(step !== 'review');
 
     useInput((input, key) => {
         if (key.escape) {

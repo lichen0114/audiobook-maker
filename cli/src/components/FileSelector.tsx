@@ -3,6 +3,7 @@ import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import Gradient from 'ink-gradient';
 import { glob } from 'glob';
+import { useTextEntryFocus } from '../contexts/text-entry.js';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -15,6 +16,8 @@ export function FileSelector({ onFilesSelected }: FileSelectorProps) {
     const [files, setFiles] = useState<string[]>([]);
     const [error, setError] = useState<string | null>(null);
     const [mode, setMode] = useState<'input' | 'confirm'>('input');
+
+    useTextEntryFocus(mode === 'input');
 
     const handleSubmit = async (value: string) => {
         setError(null);

@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 
-interface KeyHint {
+export interface KeyHint {
     key: string;
     action: string;
 }
@@ -38,9 +38,10 @@ export function KeyboardHint({ hints, compact = true }: KeyboardHintProps) {
     );
 }
 
-// Common hint presets
+// Common hint presets. Each preset lists only keys that the matching screen
+// actually handles, so the footer never advertises a shortcut that does nothing.
 export const PROCESSING_HINTS: KeyHint[] = [
-    { key: 'q', action: 'quit' },
+    { key: 'q', action: 'stop batch' },
 ];
 
 export const DONE_HINTS: KeyHint[] = [
@@ -49,15 +50,32 @@ export const DONE_HINTS: KeyHint[] = [
     { key: 'q', action: 'quit' },
 ];
 
+export const WELCOME_HINTS: KeyHint[] = [
+    { key: 'Enter', action: 'start' },
+    { key: 'q', action: 'quit' },
+];
+
 export const CONFIG_HINTS: KeyHint[] = [
+    { key: '↑↓', action: 'navigate' },
     { key: 'Enter', action: 'confirm' },
     { key: 'Esc', action: 'back' },
     { key: 'q', action: 'quit' },
 ];
 
-export const FILE_SELECT_HINTS: KeyHint[] = [
+export const REVIEW_HINTS: KeyHint[] = [
     { key: '↑↓', action: 'navigate' },
-    { key: 'Space', action: 'select' },
     { key: 'Enter', action: 'confirm' },
     { key: 'q', action: 'quit' },
+];
+
+export const METADATA_HINTS: KeyHint[] = [
+    { key: '↑↓', action: 'navigate' },
+    { key: 'Enter', action: 'confirm' },
+    { key: 'Esc', action: 'back' },
+];
+
+// The file screen is a text prompt, so single-letter shortcuts are typed, not handled.
+export const FILE_SELECT_HINTS: KeyHint[] = [
+    { key: 'Enter', action: 'search path or pattern' },
+    { key: 'Ctrl+C', action: 'quit' },
 ];
