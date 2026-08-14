@@ -311,10 +311,24 @@ export function BatchProgress({ files, setFiles, jobPlans, onComplete }: BatchPr
     const lastHeartbeatRef = React.useRef<number>(Date.now());
     const STALL_THRESHOLD_MS = 15000; // 15 seconds
 
-    // Handle quit
+    // Quitting mid-batch throws away unsaved audio, so 'q' asks first.
+    const [confirmQuit, setConfirmQuit] = useState(false);
+
     useInput((input, key) => {
-        if (input === 'q' || (key.ctrl && input === 'c')) {
+        if (key.ctrl && input === 'c') {
             exit();
+            return;
+        }
+        if (confirmQuit) {
+            if (input === 'y') {
+                exit();
+            } else if (input === 'n' || key.escape) {
+                setConfirmQuit(false);
+            }
+            return;
+        }
+        if (input === 'q') {
+            setConfirmQuit(true);
         }
     });
 
@@ -653,11 +667,28 @@ export function BatchProgress({ files, setFiles, jobPlans, onComplete }: BatchPr
         ? Math.round((parseCurrentItem / parseTotalItems) * 100)
         : undefined;
 
+    const statusColor = (status: string) =>
+        status === 'INFER' ? 'magenta' : status === 'ENCODE' ? 'cyan' : 'gray';
+
     // Worker Grid Component
     const renderWorkers = () => {
         if (workerStates.size === 0) return null;
 
         const workers = Array.from(workerStates.entries()).sort((a, b) => a[0] - b[0]);
+
+        // Inference is sequential, so a single worker is shown as plain activity.
+        if (workers.length === 1) {
+            const [, state] = workers[0];
+            return (
+                <Box marginBottom={1} paddingX={1}>
+                    <Text dimColor>Activity: </Text>
+                    <Text color={statusColor(state.status)} bold={state.status !== 'IDLE'}>
+                        {state.status}
+                    </Text>
+                    <Text> {state.details}</Text>
+                </Box>
+            );
+        }
 
         return (
             <Box flexDirection="column" borderStyle="round" borderColor="blue" paddingX={1} marginBottom={1}>
@@ -703,6 +734,17 @@ export function BatchProgress({ files, setFiles, jobPlans, onComplete }: BatchPr
                     <Text bold>🎧 Processing Audiobooks</Text>
                 </Gradient>
             </Box>
+
+            {confirmQuit && (
+                <Box marginBottom={1} paddingX={2} borderStyle="round" borderColor="red">
+                    <Text color="red" bold>Quit now? </Text>
+                    <Text>Unfinished audio for the current file is lost. </Text>
+                    <Text bold>y</Text>
+                    <Text dimColor> quit / </Text>
+                    <Text bold>n</Text>
+                    <Text dimColor> keep going</Text>
+                </Box>
+            )}
 
             {/* Stall Warning */}
             {isStalled && (

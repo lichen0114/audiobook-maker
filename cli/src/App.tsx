@@ -8,7 +8,18 @@ import { BatchReview } from './components/BatchReview.js';
 import { BatchProgress } from './components/BatchProgress.js';
 import { WelcomeScreen } from './components/WelcomeScreen.js';
 import { SetupRequired } from './components/SetupRequired.js';
-import { KeyboardHint, DONE_HINTS, PROCESSING_HINTS } from './components/KeyboardHint.js';
+import {
+    KeyboardHint,
+    CONFIG_HINTS,
+    DONE_HINTS,
+    FILE_SELECT_HINTS,
+    METADATA_HINTS,
+    PROCESSING_HINTS,
+    REVIEW_HINTS,
+    WELCOME_HINTS,
+    type KeyHint,
+} from './components/KeyboardHint.js';
+import { TextEntryProvider, useIsTextEntryActive } from './contexts/text-entry.js';
 import type { BatchPlan, FileJob, TTSConfig } from './types/profile.js';
 import { runPreflightChecks, quickCheck, type PreflightCheck } from './utils/preflight.js';
 import { extractMetadata } from './utils/metadata.js';
@@ -49,7 +60,16 @@ const defaultConfig: TTSConfig = {
 };
 
 export function App() {
+    return (
+        <TextEntryProvider>
+            <AppShell />
+        </TextEntryProvider>
+    );
+}
+
+function AppShell() {
     const { exit } = useApp();
+    const textEntryActive = useIsTextEntryActive();
     const [screen, setScreen] = useState<Screen>('checking');
     const [preflightChecks, setPreflightChecks] = useState<PreflightCheck[]>([]);
     const [files, setFiles] = useState<FileJob[]>([]);
@@ -99,9 +119,42 @@ export function App() {
         ? DONE_HINTS
         : DONE_HINTS.filter((hint) => hint.key !== 'o');
 
+    const footerHints = ((): KeyHint[] => {
+        switch (screen) {
+            case 'welcome':
+                return WELCOME_HINTS;
+            case 'files':
+                return FILE_SELECT_HINTS;
+            case 'config':
+                return CONFIG_HINTS;
+            case 'metadata':
+                return METADATA_HINTS;
+            case 'review':
+                return REVIEW_HINTS;
+            case 'processing':
+                return PROCESSING_HINTS;
+            case 'done':
+                return doneHints;
+            default:
+                return [];
+        }
+    })();
+
+    // Ctrl+C always quits, even while a text field has focus.
     useInput((input, key) => {
-        if (input === 'q' || (key.ctrl && input === 'c')) {
+        if (key.ctrl && input === 'c') {
             exit();
+        }
+    });
+
+    // Single-letter shortcuts stand down while the user is typing into a field,
+    // and while the processing screen owns the quit confirmation.
+    const shortcutsActive = !textEntryActive && screen !== 'processing';
+
+    useInput((input) => {
+        if (input === 'q') {
+            exit();
+            return;
         }
         // Open output folder in Finder when pressing 'o' on done screen
         if (screen === 'done' && input === 'o' && outputDirectories.length === 1) {
@@ -114,7 +167,7 @@ export function App() {
             setPlanningError(null);
             setScreen('files');
         }
-    });
+    }, { isActive: shortcutsActive });
 
     const handleFilesSelected = (selectedFiles: string[]) => {
         const ext = config.outputFormat === 'm4b' ? '.m4b' : '.mp3';
@@ -568,22 +621,14 @@ export function App() {
                             </Box>
                         </Box>
                     )}
-
-                    {/* Actions */}
-                    <Box marginTop={1}>
-                        <Text dimColor>⌨️  </Text>
-                        <KeyboardHint hints={doneHints} compact={true} />
-                    </Box>
                 </Box>
             )}
 
-            <Box marginTop={1}>
-                {screen === 'processing' ? (
-                    <KeyboardHint hints={PROCESSING_HINTS} compact={true} />
-                ) : screen !== 'done' ? (
-                    <Text dimColor>Press q to quit anytime</Text>
-                ) : null}
-            </Box>
+            {footerHints.length > 0 && (
+                <Box marginTop={1}>
+                    <KeyboardHint hints={footerHints} compact={true} />
+                </Box>
+            )}
         </Box>
     );
 }

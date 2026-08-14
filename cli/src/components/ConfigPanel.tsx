@@ -4,6 +4,7 @@ import SelectInput from 'ink-select-input';
 import TextInput from 'ink-text-input';
 import * as path from 'path';
 import type { FileJob, TTSConfig } from '../types/profile.js';
+import { useTextEntryFocus } from '../contexts/text-entry.js';
 import {
     getDefaultAutoChunkChars,
     getDefaultPytorchChunkChars,
@@ -15,7 +16,8 @@ import {
 // MLX: 900 chars = 180 chars/s (+11% vs 1200)
 // PyTorch: 600 chars = 98 chars/s (+3% vs 1200)
 const AUTO_CHUNK_CHARS = getDefaultAutoChunkChars();
-const DEFAULT_RECOVERY_MODE = isAppleSiliconHost() ? 'apple-balanced' : 'off';
+const IS_APPLE_SILICON = isAppleSiliconHost();
+const DEFAULT_RECOVERY_MODE = IS_APPLE_SILICON ? 'apple-balanced' : 'off';
 const DEFAULT_WORKERS = 1;
 const LOW_MEMORY_APPLE = isLowMemoryAppleHost();
 
@@ -67,7 +69,7 @@ const speeds = [
 ];
 
 const backends = [
-    { label: '🧠 Auto (Adaptive Apple Silicon)', value: 'auto' },
+    { label: IS_APPLE_SILICON ? '🧠 Auto (Adaptive Apple Silicon)' : '🧠 Auto (recommended)', value: 'auto' },
     { label: '🔥 PyTorch/MPS (Stable)', value: 'pytorch' },
     { label: '⚡ MLX (Faster - Experimental)', value: 'mlx' },
 ];
@@ -99,15 +101,47 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
     const [customPath, setCustomPath] = useState('');
     const [selectedBitrate, setSelectedBitrate] = useState<'128k' | '192k' | '320k'>(config.bitrate || '192k');
     const [normalize, setNormalize] = useState(config.normalize || false);
+    const [history, setHistory] = useState<ConfigStep[]>([]);
+    const [editingFromConfirm, setEditingFromConfirm] = useState(false);
 
     // Filter voices based on selected accent
     const filteredVoices = allVoices.filter(v => v.accent === selectedAccent);
+    const gpuStepApplies = IS_APPLE_SILICON && selectedBackend !== 'mlx';
+
+    useTextEntryFocus(step === 'output_custom');
+
+    const goTo = (next: ConfigStep) => {
+        setHistory((prev) => [...prev, step]);
+        setStep(next);
+    };
+
+    // Editing a single setting from the confirm screen returns there instead of
+    // walking the user through every remaining step again.
+    const advance = (next: ConfigStep) => {
+        if (editingFromConfirm) {
+            setEditingFromConfirm(false);
+            setHistory([]);
+            setStep('confirm');
+            return;
+        }
+        goTo(next);
+    };
+
+    const goBack = () => {
+        if (history.length === 0) {
+            onBack();
+            return;
+        }
+        setStep(history[history.length - 1]);
+        setHistory(history.slice(0, -1));
+        setEditingFromConfirm(false);
+    };
 
     useInput((input, key) => {
         if (key.escape || (step === 'accent' && key.backspace)) {
-            onBack();
+            goBack();
         }
-    });
+    }, { isActive: step !== 'output_custom' });
 
     const handleAccentSelect = (item: { value: string }) => {
         const accent = item.value as 'a' | 'b';
@@ -117,17 +151,17 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
         if (firstVoice) {
             setSelectedVoice(firstVoice.value);
         }
-        setStep('voice');
+        advance('voice');
     };
 
     const handleVoiceSelect = (item: { value: string }) => {
         setSelectedVoice(item.value);
-        setStep('speed');
+        advance('speed');
     };
 
     const handleSpeedSelect = (item: { value: string }) => {
         setSelectedSpeed(parseFloat(item.value));
-        setStep('backend');
+        advance('backend');
     };
 
     const handleBackendSelect = (item: { value: string }) => {
@@ -139,49 +173,45 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
         if (backend === 'mlx') {
             setUseMPS(true); // MLX always uses Apple Silicon
         }
-        setStep('format');
+        advance('format');
     };
 
     const handleFormatSelect = (item: { value: string }) => {
         const format = item.value as 'mp3' | 'm4b';
         setSelectedFormat(format);
-        setStep('quality');
+        advance('quality');
     };
 
     const handleQualitySelect = (item: { value: string }) => {
-        if (item.value === 'normalize_on') {
-            setNormalize(true);
-        } else if (item.value === 'normalize_off') {
-            setNormalize(false);
-        } else {
-            // Bitrate selection
+        // Normalization is a toggle: it must not consume the bitrate choice.
+        if (item.value === 'normalize') {
+            setNormalize((enabled) => !enabled);
+            return;
+        }
+        if (item.value !== 'continue') {
             setSelectedBitrate(item.value as '128k' | '192k' | '320k');
         }
-        setStep('checkpoint');
+        advance('checkpoint');
     };
 
     const handleCheckpointSelect = (item: { value: string }) => {
         const enabled = item.value === 'on';
         setCheckpointEnabled(enabled);
-        // Skip GPU step for MLX backend (it always uses Apple Silicon)
-        if (selectedBackend === 'mlx') {
-            setStep('output');
-        } else {
-            setStep('gpu');
-        }
+        // MPS only exists on Apple Silicon, and MLX always uses it.
+        advance(gpuStepApplies ? 'gpu' : 'output');
     };
 
     const handleGPUSelect = (item: { value: string }) => {
         setUseMPS(item.value === 'on');
-        setStep('output');
+        advance('output');
     };
 
     const handleOutputSelect = (item: { value: string }) => {
         if (item.value === 'same') {
             setOutputDir(null);
-            setStep('confirm');
+            advance('confirm');
         } else if (item.value === 'custom') {
-            setStep('output_custom');
+            goTo('output_custom');
         }
     };
 
@@ -189,48 +219,34 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
         if (value.trim()) {
             const resolvedPath = path.resolve(process.cwd(), value.trim());
             setOutputDir(resolvedPath);
-            setStep('confirm');
+            advance('confirm');
         }
     };
 
     const handleConfirm = (item: { value: string }) => {
-        if (item.value === 'start') {
-            onConfirm({
-                ...config,
-                voice: selectedVoice,
-                speed: selectedSpeed,
-                langCode: selectedAccent,
-                backend: selectedBackend,
-                outputFormat: selectedFormat,
-                chunkChars: selectedChunkChars,
-                workers: DEFAULT_WORKERS,
-                useMPS,
-                outputDir,
-                bitrate: selectedBitrate,
-                normalize,
-                checkpointEnabled,
-                pipelineMode: config.pipelineMode || 'auto',
-                recoveryMode: config.recoveryMode || DEFAULT_RECOVERY_MODE,
-            });
-        } else if (item.value === 'accent') {
-            setStep('accent');
-        } else if (item.value === 'voice') {
-            setStep('voice');
-        } else if (item.value === 'speed') {
-            setStep('speed');
-        } else if (item.value === 'backend') {
-            setStep('backend');
-        } else if (item.value === 'format') {
-            setStep('format');
-        } else if (item.value === 'quality') {
-            setStep('quality');
-        } else if (item.value === 'checkpoint') {
-            setStep('checkpoint');
-        } else if (item.value === 'gpu') {
-            setStep('gpu');
-        } else if (item.value === 'output') {
-            setStep('output');
+        if (item.value !== 'start') {
+            setEditingFromConfirm(true);
+            goTo(item.value as ConfigStep);
+            return;
         }
+
+        onConfirm({
+            ...config,
+            voice: selectedVoice,
+            speed: selectedSpeed,
+            langCode: selectedAccent,
+            backend: selectedBackend,
+            outputFormat: selectedFormat,
+            chunkChars: selectedChunkChars,
+            workers: DEFAULT_WORKERS,
+            useMPS,
+            outputDir,
+            bitrate: selectedBitrate,
+            normalize,
+            checkpointEnabled,
+            pipelineMode: config.pipelineMode || 'auto',
+            recoveryMode: config.recoveryMode || DEFAULT_RECOVERY_MODE,
+        });
     };
 
     const getVoiceLabel = (value: string) =>
@@ -305,9 +321,11 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                     <Text>
                         💾 Checkpointing: <Text color={step === 'checkpoint' ? 'yellow' : checkpointEnabled ? 'green' : 'gray'}>{checkpointEnabled ? 'Enabled' : 'Disabled'}</Text>
                     </Text>
-                    <Text>
-                        🍎 GPU (Apple Silicon): <Text color={step === 'gpu' ? 'yellow' : useMPS ? 'green' : 'gray'}>{useMPS ? 'Enabled ⚡' : 'Disabled'}</Text>
-                    </Text>
+                    {IS_APPLE_SILICON && (
+                        <Text>
+                            🍎 GPU (Apple Silicon): <Text color={step === 'gpu' ? 'yellow' : useMPS ? 'green' : 'gray'}>{useMPS ? 'Enabled ⚡' : 'Disabled'}</Text>
+                        </Text>
+                    )}
                     <Text>
                         📁 Output: <Text color={step === 'output' || step === 'output_custom' ? 'yellow' : 'green'}>{getOutputLabel()}</Text>
                     </Text>
@@ -396,8 +414,12 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                     <Box marginTop={1}>
                         <SelectInput
                             items={[
-                                ...bitrates,
-                                { label: `🔊 Normalize audio ${normalize ? '(Currently: ON)' : '(Currently: OFF)'}`, value: normalize ? 'normalize_off' : 'normalize_on' },
+                                ...bitrates.map(b => ({
+                                    ...b,
+                                    label: b.value === selectedBitrate ? `${b.label} ✓` : b.label,
+                                })),
+                                { label: `🔊 Normalize audio: ${normalize ? 'ON' : 'OFF'} (toggle)`, value: 'normalize' },
+                                { label: '→ Continue', value: 'continue' },
                             ]}
                             onSelect={handleQualitySelect}
                             initialIndex={bitrates.findIndex(b => b.value === selectedBitrate)}
@@ -497,7 +519,7 @@ export function ConfigPanel({ files, config, onConfirm, onBack }: ConfigPanelPro
                                 { label: '💾 Change Format', value: 'format' },
                                 { label: '🎚️  Change Quality', value: 'quality' },
                                 { label: '💾 Toggle Checkpointing', value: 'checkpoint' },
-                                ...(selectedBackend !== 'mlx' ? [{ label: '🍎 Toggle GPU Acceleration', value: 'gpu' }] : []),
+                                ...(gpuStepApplies ? [{ label: '🍎 Toggle GPU Acceleration', value: 'gpu' }] : []),
                                 { label: '📁 Change Output Directory', value: 'output' },
                             ]}
                             onSelect={handleConfirm}
