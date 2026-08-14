@@ -45,6 +45,10 @@ const config: TTSConfig = {
     workers: 1,
     outputDir: null,
     outputFormat: 'mp3',
+    backend: 'auto',
+    bitrate: '192k',
+    normalize: false,
+    checkpointEnabled: false,
 };
 
 const files: FileJob[] = [
