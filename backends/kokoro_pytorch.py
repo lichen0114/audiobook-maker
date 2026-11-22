@@ -4,6 +4,9 @@ from typing import Generator
 import numpy as np
 
 from .base import TTSBackend
+from .model_preparation import (
+    emit_model_progress, prepare_model_files, preload_local_voices, voice_filenames,
+)
 
 
 class KokoroPyTorchBackend(TTSBackend):
@@ -18,6 +21,8 @@ class KokoroPyTorchBackend(TTSBackend):
         self._pipeline = None
         self._model = None
         self._sample_rate = 24000
+        self.model_progress_callback = None
+        self.requested_voice = 'af_heart'
 
     @property
     def name(self) -> str:
@@ -42,24 +47,21 @@ class KokoroPyTorchBackend(TTSBackend):
             if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 resolved_device = "mps"
             else:
-                self._model = None
-                self._pipeline = KPipeline(lang_code=lang_code)
-                return
+                resolved_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         if resolved_device == "mps":
             if not hasattr(torch.backends, "mps") or not torch.backends.mps.is_available():
                 raise RuntimeError("MPS requested but not available")
-            self._model = KModel().to("mps").eval()
-            self._pipeline = KPipeline(lang_code=lang_code, model=self._model)
-            return
-
-        if resolved_device == "cpu":
-            self._model = KModel().to("cpu").eval()
-            self._pipeline = KPipeline(lang_code=lang_code, model=self._model)
-            return
-
-        self._model = None
-        self._pipeline = KPipeline(lang_code=lang_code)
+        paths = prepare_model_files(
+            'hexgrad/Kokoro-82M',
+            ['config.json', 'kokoro-v1_0.pth', *voice_filenames(self.requested_voice, '.pt')],
+            self.model_progress_callback,
+        )
+        emit_model_progress(self.model_progress_callback, 'loading', message='Loading the local voice model…')
+        self._model = KModel(config=paths['config.json'], model=paths['kokoro-v1_0.pth']).to(resolved_device).eval()
+        self._pipeline = KPipeline(lang_code=lang_code, model=self._model)
+        preload_local_voices(self._pipeline, self.requested_voice, paths, '.pt')
+        emit_model_progress(self.model_progress_callback, 'ready', message='Voice model ready.')
 
     def generate(
         self,

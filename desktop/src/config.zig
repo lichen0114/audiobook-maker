@@ -66,6 +66,7 @@ pub const RunMode = enum {
     inspect, // --inspect_job (one JSON inspection event, then exit)
     extract_metadata, // --extract_metadata
     check_checkpoint, // --check_checkpoint
+    preview,
 };
 
 pub const Voice = struct {
@@ -108,10 +109,10 @@ pub const TtsConfig = struct {
     chunk_chars: u32 = 0, // 0 => let the backend pick its per-backend default
     use_mps: bool = true,
     backend: Backend = .auto,
-    format: Format = .mp3,
+    format: Format = .m4b,
     bitrate: Bitrate = .k192,
     normalize: bool = false,
-    checkpoint_enabled: bool = false,
+    checkpoint_enabled: bool = true,
     resume_requested: bool = false,
     // M4B metadata overrides (empty len => omit the flag)
     title: []const u8 = "",
@@ -165,6 +166,11 @@ pub fn buildArgs(
     switch (mode) {
         .extract_metadata => push(buf, &n, "--extract_metadata"),
         .check_checkpoint => push(buf, &n, "--check_checkpoint"),
+        .preview => {
+            push(buf, &n, "--preview");
+            push(buf, &n, "--preview_seconds");
+            push(buf, &n, "30");
+        },
         .inspect => push(buf, &n, "--inspect_job"),
         .convert => {},
     }
@@ -219,6 +225,8 @@ pub fn buildArgs(
         push(buf, &n, log_file);
     }
     push(buf, &n, "--no_rich");
+    push(buf, &n, "--workers");
+    push(buf, &n, "1");
 
     return buf[0..n];
 }
@@ -227,7 +235,7 @@ test "buildArgs: mp3 convert on apple silicon with mps" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buf: [64][]const u8 = undefined;
-    const cfg = TtsConfig{ .voice = "af_bella", .speed = 1.25, .backend = .pytorch, .use_mps = true };
+    const cfg = TtsConfig{ .voice = "af_bella", .speed = 1.25, .backend = .pytorch, .use_mps = true, .format = .mp3, .checkpoint_enabled = false };
     const args = try buildArgs(&buf, arena.allocator(), cfg, "/b.epub", "/b.mp3", .convert, "/tmp/x.log", true, false);
 
     try std.testing.expect(hasPair(args, "--input", "/b.epub"));

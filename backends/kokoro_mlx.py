@@ -5,6 +5,9 @@ from typing import Generator
 import numpy as np
 
 from .base import TTSBackend
+from .model_preparation import (
+    emit_model_progress, prepare_model_files, preload_local_voices, voice_filenames,
+)
 
 
 class KokoroMLXBackend(TTSBackend):
@@ -18,6 +21,8 @@ class KokoroMLXBackend(TTSBackend):
     def __init__(self):
         self._pipeline = None
         self._sample_rate = 24000
+        self.model_progress_callback = None
+        self.requested_voice = 'af_heart'
 
     @property
     def name(self) -> str:
@@ -44,8 +49,18 @@ class KokoroMLXBackend(TTSBackend):
 
         # Load the model first, then create the pipeline
         repo_id = "prince-canuma/Kokoro-82M"
-        model = tts.load(repo_id)
+        paths = prepare_model_files(
+            repo_id,
+            ['config.json', 'kokoro-v1_0.safetensors',
+             *voice_filenames(self.requested_voice, '.safetensors')],
+            self.model_progress_callback,
+        )
+        emit_model_progress(self.model_progress_callback, 'loading', message='Loading the local voice model…')
+        from pathlib import Path
+        model = tts.load(Path(paths['config.json']).parent, model_type='kokoro')
         self._pipeline = KokoroPipeline(lang_code=lang_code, model=model, repo_id=repo_id)
+        preload_local_voices(self._pipeline, self.requested_voice, paths, '.safetensors')
+        emit_model_progress(self.model_progress_callback, 'ready', message='Voice model ready.')
 
     def generate(
         self,

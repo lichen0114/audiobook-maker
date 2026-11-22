@@ -33,7 +33,9 @@ class TestExportPcmToMp3:
         assert cmd[0] == "/usr/bin/ffmpeg"
         assert "-f" in cmd
         assert "s16le" in cmd
-        assert output_path in cmd
+        assert cmd[-1] != output_path
+        assert Path(cmd[-1]).parent == Path(output_path).parent
+        assert cmd[-1].endswith(".partial.mp3")
 
     def test_empty_audio_creates_silent_mp3(self, temp_dir, mock_ffmpeg):
         """Empty audio should create a minimal silent MP3."""

@@ -42,16 +42,15 @@
       <row gap="12" cross="center" padding="14" background="surface">
         <text size="heading" grow="1">Audiobook Maker</text>
         <button variant="secondary" icon="plus" on-press="add_books">Add Books</button>
+        <if test="{previewing}"><button variant="secondary" on-press="cancel_preview">Cancel Preview</button></if>
         <if test="{converting}">
-          <button variant="destructive" icon="x" on-press="cancel_convert">Cancel</button>
+          <button variant="secondary" on-press="skip_book">Skip Current</button>
+          <button variant="destructive" icon="x" on-press="cancel_convert">{pauseLabel}</button>
         </if>
         <else>
-          <if test="{canConvert}">
-            <button variant="primary" icon="play" on-press="convert_all">Convert All</button>
-          </if>
-          <else>
-            <button variant="primary" disabled="true">Convert All</button>
-          </else>
+          <if test="{canConvert}"><button variant="secondary" on-press="convert_all">Create All</button></if>
+          <if test="{canConvertSelected}"><button variant="primary" icon="play" on-press="convert_selected">Create Audiobook</button></if>
+          <else><button variant="primary" disabled="true">Create Audiobook</button></else>
         </else>
       </row>
 
@@ -60,7 +59,7 @@
 
         <!-- sidebar -->
         <column width="304" gap="8" padding="12" background="surface_subtle">
-          <input grow="1" placeholder="Paste an .epub path, press Enter"
+          <input placeholder="Paste an .epub path, press Enter"
                  text="{pathDraft}" on-input="path_edit" on-submit="add_path"/>
           <if test="{hasBooks}">
             <scroll grow="1">
@@ -69,6 +68,7 @@
                   <row gap="6" cross="center" padding="6" on-press="select_book:{b.index}">
                     <if test="{b.selected}"><icon name="chevron-right" foreground="accent"/></if>
                     <else><spacer width="16"/></else>
+                    <if test="{b.has_cover}"><avatar width="28" height="40" radius="md" image="{b.cover_image}" label="Book cover"/></if>
                     <column grow="1" gap="1">
                       <text>{b.title}</text>
                       <text foreground="text_muted">{b.subtitle}</text>
@@ -83,7 +83,7 @@
           <else>
             <column grow="1" main="center" cross="center" gap="8" padding="16">
               <icon name="folder-open" foreground="text_muted"/>
-              <text foreground="text_muted">No books yet</text>
+              <text foreground="text_muted">Add an EPUB to hear your first sample</text>
             </column>
           </else>
         </column>
@@ -91,13 +91,12 @@
         <separator/>
 
         <!-- detail -->
-        <column grow="1" gap="16" padding="22">
+        <scroll grow="1"><column grow="1" gap="16" padding="22">
           <if test="{selValid}">
 
             <row gap="18" cross="start">
-              <column width="92" height="126" background="surface" radius="md" main="center" cross="center">
-                <icon name="file-text" foreground="text_muted"/>
-              </column>
+              <if test="{selHasCover}"><avatar width="92" height="126" radius="md" image="{selCover}" label="Book cover"/></if>
+              <else><column width="92" height="126" background="surface" radius="md" main="center" cross="center"><icon name="file-text" foreground="text_muted"/></column></else>
               <column grow="1" gap="4">
                 <text size="heading">{selTitle}</text>
                 <text foreground="text_muted">{selAuthor}</text>
@@ -114,33 +113,51 @@
               </row>
             </if>
 
+            <if test="{selHasWarning}"><text foreground="warning">{selWarning}</text></if>
+            <row gap="8">
+              <if test="{canPreview}"><button variant="primary" icon="play" on-press="preview_book">Preview 30 Seconds</button></if>
+              <if test="{canPlayPreview}"><button variant="secondary" on-press="play_preview">Play / Stop Sample</button></if>
+              <if test="{canPlay}"><button variant="secondary" on-press="play_audio">Play / Stop Audiobook</button><button variant="secondary" on-press="reveal_output">Reveal in Finder</button></if>
+              <if test="{canRetry}"><button variant="secondary" on-press="retry_selected">Retry This Book</button></if>
+            </row>
+            <text foreground="text_muted">Sample the first included section before converting the full book.</text>
+
             <if test="{selResumable}">
               <column gap="8" background="surface" radius="md" padding="12">
                 <text>{selCkpt}</text>
-                <switch checked="{selResumeChosen}" on-change="toggle_resume">Resume from checkpoint</switch>
+                <switch checked="{selResumeChosen}" on-change="toggle_resume">Continue saved progress</switch>
               </column>
             </if>
 
             <separator/>
 
-            <text size="heading">Settings</text>
+            <text size="heading">Settings for This Book</text>
+            <if test="{cfgEditable}">
+            <input placeholder="Book title" text="{titleDraft}" on-input="title_edit"/>
+            <input placeholder="Author" text="{authorDraft}" on-input="author_edit"/>
+            <row gap="8"><button variant="secondary" on-press="apply_metadata">Save Title and Author</button><button variant="secondary" on-press="choose_cover">Choose Cover</button></row>
 
             <row gap="12" cross="center">
               <text width="92" foreground="text_muted">Voice</text>
-              <button variant="secondary" on-press="cycle_voice">{voiceLabel}</button>
+              <button variant="secondary" on-press="pick_voice">{voiceLabel}</button>
               <text foreground="text_muted">{accentLabel}</text>
             </row>
             <row gap="12" cross="center">
               <text width="92" foreground="text_muted">Speed</text>
-              <button variant="secondary" on-press="cycle_speed">{speedLabel}</button>
+              <button variant="secondary" on-press="slower_speed">−</button><text>{speedLabel}</text><button variant="secondary" on-press="faster_speed">+</button>
             </row>
             <row gap="12" cross="center">
               <text width="92" foreground="text_muted">Format</text>
               <toggle-group gap="2">
-                <toggle-button selected="{isMp3}" on-toggle="set_mp3">MP3</toggle-button>
-                <toggle-button selected="{isM4b}" on-toggle="set_m4b">M4B</toggle-button>
+                <toggle-button selected="{isMp3}" on-toggle="set_mp3">MP3 · Compatibility</toggle-button>
+                <toggle-button selected="{isM4b}" on-toggle="set_m4b">M4B · Chapters</toggle-button>
               </toggle-group>
             </row>
+            <text foreground="text_muted">Save to: {selOutput}</text>
+            <button variant="secondary" icon="folder-open" on-press="choose_destination">Choose Output Folder</button>
+            <button variant="secondary" on-press="apply_all">Apply Settings to Unstarted Books</button>
+            <button variant="ghost" on-press="toggle_advanced">Advanced Settings</button>
+            <if test="{showAdvanced}">
             <row gap="12" cross="center">
               <text width="92" foreground="text_muted">Quality</text>
               <toggle-group gap="2">
@@ -160,25 +177,42 @@
                 </toggle-group>
               </row>
             </if>
+            <button variant="secondary" on-press="relink_source">Relink Source EPUB</button>
             <row gap="18" cross="center">
               <if test="{showGpu}">
                 <switch checked="{cfgGpu}" on-change="toggle_gpu">Apple GPU (MPS)</switch>
               </if>
-              <switch checked="{cfgCheckpoint}" on-change="toggle_checkpoint">Checkpoint</switch>
+              <switch checked="{cfgCheckpoint}" on-change="toggle_checkpoint">Save progress automatically</switch>
             </row>
 
-            <spacer grow="1"/>
-            <row gap="8">
-              <button variant="ghost" icon="trash" on-press="remove_selected">Remove</button>
-            </row>
+            </if>
+            <if test="{selHasSections}">
+              <separator/>
+              <button variant="secondary" on-press="toggle_sections">Review Included Sections</button>
+              <if test="{sectionsExpanded}">
+              <text size="heading">Included Sections</text>
+              <text foreground="text_muted">Turn off sections you do not want narrated.</text>
+              <column gap="10">
+                <for each="sectionRows" key="index" as="section">
+                  <column gap="3">
+                    <switch checked="{section.included}" on-change="toggle_section:{section.index}">{section.title}</switch>
+                    <text foreground="text_muted">{section.detail}</text>
+                  </column>
+                </for>
+              </column>
+              </if>
+            </if>
+            <row gap="8"><button variant="ghost" icon="trash" on-press="remove_selected">Remove from Library</button></row>
+            </if>
+            <else><if test="{previewing}"><text foreground="text_muted">Preparing your sample. Cancel the preview to change settings.</text></if><else><text foreground="text_muted">This conversion uses saved settings. Pause the queue to make changes.</text></else></else>
 
           </if>
           <else>
             <column grow="1" main="center" cross="center">
-              <text foreground="text_muted">Select a book to configure it</text>
+              <text foreground="text_muted">Choose a book to prepare its audiobook</text>
             </column>
           </else>
-        </column>
+        </column></scroll>
       </row>
 
       <status-bar>{statusText}</status-bar>

@@ -1,7 +1,11 @@
 import os
+import errno
+import logging
 import shutil
 import subprocess
 import tempfile
+import threading
+import sys
 from typing import List, Optional
 
 import numpy as np
@@ -17,6 +21,163 @@ except ImportError:
 
 
 DEFAULT_SAMPLE_RATE = 24000
+_STDERR_LIMIT = 64 * 1024
+
+
+def _rename_exclusive_macos(source: str, destination: str) -> None:
+    """Use Darwin's atomic no-clobber rename on volumes without hard links."""
+    import ctypes
+
+    rename = ctypes.CDLL(None, use_errno=True).renamex_np
+    rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    # Defined by the macOS SDK's sys/stdio.h; available since macOS 10.12.
+    rename_excl = 0x00000004
+    if rename(os.fsencode(source), os.fsencode(destination), rename_excl) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+
+def _publish_no_clobber(source: str, destination: str) -> None:
+    try:
+        os.link(source, destination)
+    except OSError as exc:
+        if sys.platform != 'darwin' or exc.errno not in {
+            errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM,
+        }:
+            raise
+        _rename_exclusive_macos(source, destination)
+
+
+class _OutputPublication:
+    """Keep incomplete audio hidden and publish without clobbering another file."""
+
+    def __init__(self, output_path: str, overwrite: bool = False):
+        self.output_path = os.fspath(output_path)
+        self.overwrite = overwrite
+        self.published_path: Optional[str] = None
+        self._cleanup_warned = False
+        directory = os.path.dirname(os.path.abspath(self.output_path))
+        stem, suffix = os.path.splitext(os.path.basename(self.output_path))
+        fd, self.temp_path = tempfile.mkstemp(
+            prefix=f'.{stem}-', suffix=f'.partial{suffix}', dir=directory,
+        )
+        os.close(fd)
+
+    def publish(self) -> str:
+        if os.path.getsize(self.temp_path) == 0:
+            raise RuntimeError('ffmpeg produced no audio output')
+        with open(self.temp_path, 'rb') as audio:
+            os.fsync(audio.fileno())
+        if self.overwrite:
+            os.replace(self.temp_path, self.output_path)
+            self.published_path = self.output_path
+            self._sync_parent()
+            return self.output_path
+
+        stem, suffix = os.path.splitext(self.output_path)
+        candidate = self.output_path
+        number = 2
+        while True:
+            try:
+                # Unlike rename, link fails atomically if the destination was
+                # claimed between planning and publication. Both paths are on
+                # the same filesystem because the temporary file is a sibling.
+                _publish_no_clobber(self.temp_path, candidate)
+                self.published_path = candidate
+                self.discard()
+                self._sync_parent()
+                return candidate
+            except FileExistsError:
+                candidate = f'{stem} ({number}){suffix}'
+                number += 1
+
+    def _sync_parent(self) -> None:
+        try:
+            fd = os.open(os.path.dirname(os.path.abspath(self.output_path)), os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+
+    def discard(self) -> None:
+        try:
+            os.unlink(self.temp_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            if self.published_path is None:
+                raise
+            if not self._cleanup_warned:
+                logging.getLogger(__name__).warning(
+                    'Audiobook saved to %s, but its temporary file could not be removed: %s',
+                    self.published_path, exc,
+                )
+                self._cleanup_warned = True
+
+
+def _quiet_command(cmd: List[str], temp_path: str) -> List[str]:
+    return [cmd[0], '-hide_banner', '-nostats', '-loglevel', 'error', *cmd[1:-1], temp_path]
+
+
+def _run_atomic_export(
+    cmd: List[str], output_path: str, *, input_data: Optional[bytes] = None,
+    overwrite: bool = False,
+) -> str:
+    publication = _OutputPublication(output_path, overwrite)
+    try:
+        kwargs = {'capture_output': True}
+        if input_data is not None:
+            kwargs['input'] = input_data
+        proc = subprocess.run(_quiet_command(cmd, publication.temp_path), **kwargs)
+        if proc.returncode != 0:
+            err = proc.stderr.decode('utf-8', errors='replace')
+            raise RuntimeError(f'ffmpeg failed: {err}')
+        return publication.publish()
+    finally:
+        publication.discard()
+
+
+class _StderrCapture:
+    """Drain the child continuously, retaining only a bounded diagnostic tail."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.tail = bytearray()
+        self.thread = threading.Thread(target=self._drain, name='ffmpeg-stderr', daemon=True)
+        self.thread.start()
+
+    def _drain(self) -> None:
+        try:
+            while data := self.stream.read(8192):
+                self.tail.extend(data)
+                if len(self.tail) > _STDERR_LIMIT:
+                    del self.tail[:-_STDERR_LIMIT]
+        except (OSError, ValueError):
+            pass
+        finally:
+            self.stream.close()
+
+    def finish(self, timeout: Optional[float] = None) -> bytes:
+        self.thread.join(timeout=timeout)
+        return bytes(self.tail)
+
+
+class _StreamExportState:
+    def __init__(self, publication: _OutputPublication, stderr):
+        self.publication = publication
+        self.capture = _StderrCapture(stderr) if stderr is not None else None
+
+
+def discard_mp3_export_stream(proc: subprocess.Popen) -> None:
+    """Clean staging audio after the process has exited or been terminated."""
+    state = getattr(proc, '_audiobook_export', None)
+    if isinstance(state, _StreamExportState):
+        if state.capture is not None:
+            state.capture.finish(timeout=1)
+        state.publication.discard()
 
 
 def audio_to_int16(audio) -> np.ndarray:
@@ -166,7 +327,9 @@ def export_pcm_to_mp3(
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     bitrate: str = "192k",
     normalize: bool = False,
-) -> None:
+    *,
+    overwrite: bool = False,
+) -> str:
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path is None:
         raise FileNotFoundError(
@@ -182,11 +345,10 @@ def export_pcm_to_mp3(
             "-b:a", bitrate,
             "-y", output_path,
         ]
-        subprocess.run(cmd, check=True, capture_output=True)
-        return
+        return _run_atomic_export(cmd, output_path, overwrite=overwrite)
 
     if pcm_data.dtype != np.int16:
-        pcm_data = pcm_data.astype(np.int16)
+        pcm_data = audio_to_int16(pcm_data)
 
     cmd = [
         ffmpeg_path,
@@ -204,9 +366,7 @@ def export_pcm_to_mp3(
         "-y", output_path,
     ])
 
-    proc = subprocess.run(cmd, input=pcm_data.tobytes(), capture_output=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode()}")
+    return _run_atomic_export(cmd, output_path, input_data=pcm_data.tobytes(), overwrite=overwrite)
 
 
 def export_pcm_to_m4b(
@@ -217,7 +377,9 @@ def export_pcm_to_m4b(
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     bitrate: str = "192k",
     normalize: bool = False,
-) -> None:
+    *,
+    overwrite: bool = False,
+) -> str:
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path is None:
         raise FileNotFoundError(
@@ -259,9 +421,7 @@ def export_pcm_to_m4b(
             output_path,
         )
 
-        proc = subprocess.run(cmd, input=pcm_data.tobytes(), capture_output=True)
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode()}")
+        return _run_atomic_export(cmd, output_path, input_data=pcm_data.tobytes(), overwrite=overwrite)
 
     finally:
         for temp_file in temp_files:
@@ -277,7 +437,9 @@ def export_pcm_file_to_mp3(
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     bitrate: str = "192k",
     normalize: bool = False,
-) -> None:
+    *,
+    overwrite: bool = False,
+) -> str:
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path is None:
         raise FileNotFoundError(
@@ -293,8 +455,7 @@ def export_pcm_file_to_mp3(
             "-b:a", bitrate,
             "-y", output_path,
         ]
-        subprocess.run(cmd, check=True, capture_output=True)
-        return
+        return _run_atomic_export(cmd, output_path, overwrite=overwrite)
 
     cmd = [
         ffmpeg_path,
@@ -312,9 +473,7 @@ def export_pcm_file_to_mp3(
         "-y", output_path,
     ])
 
-    proc = subprocess.run(cmd, capture_output=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode()}")
+    return _run_atomic_export(cmd, output_path, overwrite=overwrite)
 
 
 def open_mp3_export_stream(
@@ -322,6 +481,8 @@ def open_mp3_export_stream(
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     bitrate: str = "192k",
     normalize: bool = False,
+    *,
+    overwrite: bool = False,
 ) -> subprocess.Popen:
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path is None:
@@ -345,24 +506,46 @@ def open_mp3_export_stream(
         "-y", output_path,
     ])
 
-    return subprocess.Popen(
-        cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    publication = _OutputPublication(output_path, overwrite)
+    try:
+        proc = subprocess.Popen(
+            _quiet_command(cmd, publication.temp_path),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        proc._audiobook_export = _StreamExportState(publication, proc.stderr)
+        return proc
+    except BaseException:
+        publication.discard()
+        raise
 
 
-def close_mp3_export_stream(proc: subprocess.Popen) -> None:
-    if proc.stdin is not None:
-        proc.stdin.close()
-    stderr = b""
-    if proc.stderr is not None:
-        stderr = proc.stderr.read()
-    return_code = proc.wait()
-    if return_code != 0:
-        err = stderr.decode("utf-8", errors="replace")
-        raise RuntimeError(f"ffmpeg failed: {err}")
+def close_mp3_export_stream(proc: subprocess.Popen) -> Optional[str]:
+    state = getattr(proc, '_audiobook_export', None)
+    try:
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            # Collect ffmpeg's actual error below instead of a broken-pipe
+            # symptom from its input stream.
+            pass
+        return_code = proc.wait()
+        if isinstance(state, _StreamExportState):
+            stderr = state.capture.finish() if state.capture is not None else b''
+        else:
+            stderr = proc.stderr.read() if proc.stderr is not None else b''
+        if return_code != 0:
+            err = stderr.decode('utf-8', errors='replace')
+            raise RuntimeError(f'ffmpeg failed: {err}')
+        if isinstance(state, _StreamExportState):
+            proc.published_output = state.publication.publish()
+            return proc.published_output
+        return None
+    finally:
+        if isinstance(state, _StreamExportState):
+            state.publication.discard()
 
 
 def export_pcm_file_to_m4b(
@@ -373,7 +556,9 @@ def export_pcm_file_to_m4b(
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     bitrate: str = "192k",
     normalize: bool = False,
-) -> None:
+    *,
+    overwrite: bool = False,
+) -> str:
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path is None:
         raise FileNotFoundError(
@@ -414,9 +599,7 @@ def export_pcm_file_to_m4b(
             output_path,
         )
 
-        proc = subprocess.run(cmd, capture_output=True)
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode()}")
+        return _run_atomic_export(cmd, output_path, overwrite=overwrite)
     finally:
         for temp_file in temp_files:
             try:

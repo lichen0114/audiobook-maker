@@ -39,7 +39,9 @@ class TestExportPcmToM4b:
         assert "s16le" in cmd
         assert "-c:a" in cmd
         assert "aac" in cmd
-        assert output_path in cmd
+        assert cmd[-1] != output_path
+        assert Path(cmd[-1]).parent == Path(output_path).parent
+        assert cmd[-1].endswith(".partial.m4b")
 
     def test_includes_metadata_file(self, temp_dir, mock_ffmpeg):
         """Export should create and use metadata file."""

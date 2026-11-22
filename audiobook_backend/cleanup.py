@@ -3,6 +3,7 @@ import subprocess
 from typing import Optional
 
 from backends import TTSBackend
+from .export import discard_mp3_export_stream
 
 
 def cleanup_backend(backend: Optional[TTSBackend]) -> Optional[BaseException]:
@@ -22,6 +23,7 @@ def cleanup_ffmpeg_process(
     if proc is None:
         return None
 
+    cleanup_error = None
     try:
         try:
             if proc.stdin is not None:
@@ -38,9 +40,15 @@ def cleanup_ffmpeg_process(
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     pass
-        return None
     except BaseException as exc:  # pragma: no cover - asserted via main() behavior
-        return exc
+        cleanup_error = exc
+    finally:
+        try:
+            discard_mp3_export_stream(proc)
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+    return cleanup_error
 
 
 def cleanup_spool_path(spool_path: Optional[str]) -> Optional[BaseException]:

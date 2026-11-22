@@ -3,6 +3,11 @@ import gc
 import os
 import sys
 import tempfile
+import hashlib
+import json
+import signal
+import threading
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -114,6 +119,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--voice", default="af_heart", help="Kokoro voice")
     parser.add_argument("--lang_code", default="a", help="Kokoro language code")
     parser.add_argument("--speed", type=float, default=1.0, help="Speech speed")
+    parser.add_argument("--preview", action="store_true", help="Generate a bounded sample of the first included section")
+    parser.add_argument("--preview_seconds", type=float, default=30, help="Sample duration, at most 30 seconds")
+    parser.add_argument("--sections_file", help="JSON array of included section IDs from inspection")
+    parser.add_argument("--inspect_assets_dir", help="Directory for extracted cover artwork")
+    parser.add_argument("--overwrite", action="store_true", help="Explicitly replace existing output after successful export")
+    parser.add_argument("--reset_checkpoint", action="store_true", help="Synchronously discard saved progress before creating this book")
     parser.add_argument(
         "--chunk_chars",
         type=int,
@@ -252,6 +263,16 @@ def inspect_job(
         raise RuntimeError("Checkpoint inspection is required for inspect_job().")
 
     metadata = prepared.book_metadata
+    cover_path = None
+    assets_dir = getattr(args, "inspect_assets_dir", None)
+    if assets_dir and metadata.cover_image:
+        asset_dir = Path(assets_dir)
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        suffix = ".png" if metadata.cover_mime_type == "image/png" else ".jpg"
+        cover_file = asset_dir / (hashlib.sha256(metadata.cover_image).hexdigest() + suffix)
+        if not cover_file.exists():
+            cover_file.write_bytes(metadata.cover_image)
+        cover_path = str(cover_file)
     return JobInspectionResult(
         input_path=args.input,
         output_path=args.output,
@@ -267,6 +288,7 @@ def inspect_job(
             "title": metadata.title,
             "author": metadata.author,
             "has_cover": metadata.cover_image is not None,
+            **({"cover_path": cover_path} if cover_path else {}),
         },
         checkpoint={
             "exists": checkpoint_status.exists,
@@ -278,6 +300,8 @@ def inspect_job(
         },
         warnings=prepared.warnings,
         errors=[],
+        sections=[section.to_dict() for section in getattr(prepared.parsed_epub, "sections", [])],
+        cover_path=cover_path,
     )
 
 
@@ -290,6 +314,12 @@ def main(deps: Optional[MainDeps] = None) -> None:
         )
 
     args = deps.parse_args()
+    previous_term_handler = None
+    if threading.current_thread() is threading.main_thread():
+        previous_term_handler = signal.getsignal(signal.SIGTERM)
+        def interrupt_job(_signum, _frame):
+            raise KeyboardInterrupt("Conversion paused; completed chunks are saved.")
+        signal.signal(signal.SIGTERM, interrupt_job)
     events = deps.event_emitter_cls(
         event_format=args.event_format,
         job_id=os.path.basename(args.output) or "job",
@@ -310,6 +340,10 @@ def main(deps: Optional[MainDeps] = None) -> None:
             raise ValueError("--prefetch_chunks must be >= 1")
         if args.pcm_queue_size < 1:
             raise ValueError("--pcm_queue_size must be >= 1")
+        if args.speed <= 0:
+            raise ValueError("Speech speed must be positive")
+        if not 0 < getattr(args, "preview_seconds", 30) <= 30:
+            raise ValueError("Preview duration must be between 0 and 30 seconds")
 
         if args.workers != 1:
             events.warn(
@@ -333,8 +367,17 @@ def main(deps: Optional[MainDeps] = None) -> None:
             events.emit("inspection", result=inspection.to_dict())
             return
 
+        if getattr(args, "preview", False):
+            from .preview import create_preview
+            create_preview(args, deps, events)
+            return
+
         checkpoint_dir = deps.get_checkpoint_dir(args.output)
         use_checkpoint = args.checkpoint or args.resume
+
+        if getattr(args, "reset_checkpoint", False):
+            deps.cleanup_checkpoint(checkpoint_dir)
+            args.resume = False
 
         if args.check_checkpoint:
             state = deps.load_checkpoint(checkpoint_dir)
@@ -399,6 +442,7 @@ def main(deps: Optional[MainDeps] = None) -> None:
                 prepared.resolved_backend,
                 prepared.chunk_chars,
                 prepared.resolved_device,
+                    selected_section_ids=[getattr(s, "section_id", str(i)) for i, s in enumerate(prepared.chapters)],
             )
             if deps.verify_checkpoint(checkpoint_dir, args.input, config_for_verify):
                 state = deps.load_checkpoint(checkpoint_dir)
@@ -417,14 +461,24 @@ def main(deps: Optional[MainDeps] = None) -> None:
         should_cleanup_checkpoint = False
         sample_rate = DEFAULT_SAMPLE_RATE
         main_error: Optional[BaseException] = None
+        output_published = False
+        run_heartbeat_stop, run_heartbeat_thread = deps.start_heartbeat_emitter(
+            events, thread_name="conversion-heartbeat"
+        )
 
         try:
             try:
-                backend = deps.create_backend(prepared.resolved_backend)
-                backend.initialize(
-                    lang_code=args.lang_code,
-                    device=prepared.resolved_device,
-                )
+                events.emit("phase", phase="PREPARING_MODEL")
+                init_stop, init_thread = deps.start_heartbeat_emitter(events, thread_name="model-heartbeat")
+                try:
+                    backend = deps.create_backend(prepared.resolved_backend)
+                    backend.model_progress_callback = lambda **payload: events.emit("model_progress", **payload)
+                    backend.requested_voice = args.voice
+                    events.emit("phase", phase="LOADING_MODEL")
+                    backend.initialize(lang_code=args.lang_code, device=prepared.resolved_device)
+                finally:
+                    init_stop.set()
+                    init_thread.join(timeout=1)
                 sample_rate = backend.sample_rate
             except ImportError as exc:
                 raise RuntimeError(
@@ -442,6 +496,7 @@ def main(deps: Optional[MainDeps] = None) -> None:
                     sample_rate=sample_rate,
                     bitrate=args.bitrate,
                     normalize=args.normalize,
+                    **({"overwrite": True} if getattr(args, "overwrite", False) else {}),
                 )
             else:
                 spool_file = deps.tempfile_module.NamedTemporaryFile(
@@ -459,6 +514,7 @@ def main(deps: Optional[MainDeps] = None) -> None:
                         prepared.resolved_backend,
                         prepared.chunk_chars,
                         prepared.resolved_device,
+                        selected_section_ids=[getattr(s, "section_id", str(i)) for i, s in enumerate(prepared.chapters)],
                     )
                     checkpoint_state = CheckpointState(
                         epub_hash=epub_hash,
@@ -598,7 +654,7 @@ def main(deps: Optional[MainDeps] = None) -> None:
             if args.format == "m4b":
                 if spool_path is None:
                     raise RuntimeError("M4B export requires a spool path.")
-                deps.export_pcm_file_to_m4b(
+                published_output = deps.export_pcm_file_to_m4b(
                     spool_path,
                     args.output,
                     metadata=prepared.book_metadata,
@@ -606,30 +662,39 @@ def main(deps: Optional[MainDeps] = None) -> None:
                     sample_rate=sample_rate,
                     bitrate=args.bitrate,
                     normalize=args.normalize,
+                    **({"overwrite": True} if getattr(args, "overwrite", False) else {}),
                 )
             else:
                 if use_mp3_stream:
                     if mp3_export_proc is None:
                         raise RuntimeError("MP3 export process was not initialized.")
-                    deps.close_mp3_export_stream(mp3_export_proc)
+                    published_output = deps.close_mp3_export_stream(mp3_export_proc)
                     mp3_export_proc = None
                 else:
                     if spool_path is None:
                         raise RuntimeError("MP3 export requires a spool path.")
-                    deps.export_pcm_file_to_mp3(
+                    published_output = deps.export_pcm_file_to_mp3(
                         spool_path,
                         args.output,
                         sample_rate=sample_rate,
                         bitrate=args.bitrate,
                         normalize=args.normalize,
+                        **({"overwrite": True} if getattr(args, "overwrite", False) else {}),
                     )
 
+            if isinstance(published_output, str):
+                args.output = published_output
+
+            output_published = True
             avg_time = sum(run_result.times) / max(len(run_result.times), 1)
             should_cleanup_checkpoint = use_checkpoint
 
             if should_cleanup_checkpoint:
-                deps.cleanup_checkpoint(checkpoint_dir)
-                events.emit("checkpoint", code="CLEANED")
+                try:
+                    deps.cleanup_checkpoint(checkpoint_dir)
+                    events.emit("checkpoint", code="CLEANED")
+                except OSError as exc:
+                    events.warn(f"Audiobook saved, but saved-progress cleanup needs attention: {exc}")
 
             events.emit("done", output=args.output, chunks=total_chunks)
             events.info("Done.")
@@ -640,6 +705,8 @@ def main(deps: Optional[MainDeps] = None) -> None:
             main_error = exc
             raise
         finally:
+            run_heartbeat_stop.set()
+            run_heartbeat_thread.join(timeout=1)
             cleanup_error: Optional[BaseException] = None
 
             backend_cleanup_error = deps.cleanup_backend(backend)
@@ -655,12 +722,17 @@ def main(deps: Optional[MainDeps] = None) -> None:
                 cleanup_error = spool_cleanup_error
 
             if main_error is None and cleanup_error is not None:
-                raise cleanup_error
+                if output_published:
+                    events.warn(f"Audiobook saved, but temporary-file cleanup needs attention: {cleanup_error}")
+                else:
+                    raise cleanup_error
     except BaseException as exc:
         if isinstance(exc, Exception):
             events.error(str(exc))
         raise
     finally:
+        if previous_term_handler is not None:
+            signal.signal(signal.SIGTERM, previous_term_handler)
         try:
             deps.gc_collect()
         finally:

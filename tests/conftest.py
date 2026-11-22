@@ -111,7 +111,11 @@ def mock_ffmpeg(temp_dir):
         mock_which.return_value = "/usr/bin/ffmpeg"
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+            def successful_encode(cmd, **kwargs):
+                Path(cmd[-1]).write_bytes(b"encoded audio")
+                return MagicMock(returncode=0, stderr=b"")
+
+            mock_run.side_effect = successful_encode
             yield mock_run
 
 

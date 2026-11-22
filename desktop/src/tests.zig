@@ -85,6 +85,7 @@ test "library screen shows a selected, ready book and its settings" {
 
     var model = main.initialModel();
     model.screen = .library;
+    model.state_loaded = true;
     model.book_count = 1;
     model.selected = 0;
     model.books[0].input.set("/books/gatsby.epub");
@@ -101,7 +102,7 @@ test "library screen shows a selected, ready book and its settings" {
     try testing.expect(hasText(tree.root, "F. Scott Fitzgerald"));
     try testing.expect(hasText(tree.root, "Settings"));
     // The convert action is enabled when a ready book exists.
-    _ = findByText(tree.root, .button, "Convert All") orelse return error.MissingConvertButton;
+    _ = findByText(tree.root, .button, "Create Audiobook") orelse return error.MissingConvertButton;
     // Voice cycle button carries the current voice label.
     try testing.expect(hasText(tree.root, "Heart"));
 }
@@ -118,7 +119,8 @@ test "cycling voice and toggling format mutate the config" {
     dispatchPure(&model, .cycle_voice);
     try testing.expectEqualStrings("af_bella", model.cfg.voice);
 
-    try testing.expect(model.cfg.format == .mp3);
+    try testing.expect(model.cfg.format == .m4b);
+    try testing.expect(model.cfg.checkpoint_enabled);
     dispatchPure(&model, .set_mlx);
     try testing.expect(model.cfg.backend == .mlx);
     try testing.expect(model.cfg.use_mps); // mlx forces MPS on
@@ -133,4 +135,24 @@ fn dispatchPure(model: *Model, msg: Msg) void {
     const App = native_sdk.UiApp(Model, Msg);
     var fx: App.Effects = undefined;
     main.update(model, msg, &fx);
+}
+
+test "cover thumbnails and expanded section controls render" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var model = main.initialModel();
+    model.screen = .library;
+    model.state_loaded = true;
+    model.sections_expanded = true;
+    model.book_count = 1;
+    model.books[0].id = 1;
+    model.books[0].status = .ready;
+    model.books[0].cover_image = 23;
+    model.books[0].section_count = 1;
+    model.books[0].sections[0].title.set("Chapter One");
+    model.books[0].sections[0].excerpt.set("A short passage.");
+    const tree = try buildTree(arena_state.allocator(), &model);
+    try testing.expect(hasText(tree.root, "Chapter One"));
+    try testing.expect(hasText(tree.root, "A short passage."));
+    _ = findByText(tree.root, .button, "Create Audiobook") orelse return error.MissingCreateButton;
 }

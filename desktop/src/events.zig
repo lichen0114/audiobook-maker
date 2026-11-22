@@ -15,6 +15,8 @@ const config = @import("config.zig");
 
 pub const Phase = enum {
     parsing,
+    preparing_model,
+    loading_model,
     inference,
     concatenating,
     exporting,
@@ -22,6 +24,8 @@ pub const Phase = enum {
 
     pub fn fromStr(s: []const u8) ?Phase {
         if (std.ascii.eqlIgnoreCase(s, "PARSING")) return .parsing;
+        if (std.ascii.eqlIgnoreCase(s, "PREPARING_MODEL")) return .preparing_model;
+        if (std.ascii.eqlIgnoreCase(s, "LOADING_MODEL")) return .loading_model;
         if (std.ascii.eqlIgnoreCase(s, "INFERENCE")) return .inference;
         if (std.ascii.eqlIgnoreCase(s, "CONCATENATING")) return .concatenating;
         if (std.ascii.eqlIgnoreCase(s, "EXPORTING")) return .exporting;
@@ -31,7 +35,9 @@ pub const Phase = enum {
 
     pub fn label(self: Phase) []const u8 {
         return switch (self) {
-            .parsing => "Parsing",
+            .parsing => "Reading book",
+            .preparing_model => "Preparing voice model · first use needs internet",
+            .loading_model => "Loading voice model",
             .inference => "Generating speech",
             .concatenating => "Concatenating",
             .exporting => "Exporting",
@@ -42,7 +48,20 @@ pub const Phase = enum {
 
 pub const WorkerStatus = enum { idle, infer, encode };
 
+pub const MAX_SECTIONS = 96;
+pub const Section = struct {
+    id: []const u8 = "",
+    title: []const u8 = "",
+    excerpt: []const u8 = "",
+    word_count: u64 = 0,
+    included: bool = true,
+};
+
 pub const Inspection = struct {
+    sections: [MAX_SECTIONS]Section = [_]Section{.{}} ** MAX_SECTIONS,
+    section_count: usize = 0,
+    section_overflow: bool = false,
+    cover_path: []const u8 = "",
     total_chars: u64 = 0,
     total_chunks: u32 = 0,
     chapter_count: u32 = 0,
@@ -68,11 +87,12 @@ pub const Event = union(enum) {
     progress: struct { current: u32, total: u32 },
     timing: u32, // per-chunk ms
     heartbeat: i64,
+    model_progress: struct { message: []const u8, downloaded: u64, total: u64 },
     worker: struct { id: u32, status: WorkerStatus, details: []const u8 },
     checkpoint: struct { code: []const u8, detail: []const u8 },
     log: struct { level: []const u8, message: []const u8 },
     err: []const u8,
-    done: void,
+    done: struct { output: []const u8 = "" },
     // --extract_metadata mode
     meta_title: []const u8,
     meta_author: []const u8,
@@ -129,6 +149,7 @@ fn parseJson(obj: std.json.ObjectMap) ?Event {
         const p = getStr(obj, "phase") orelse return null;
         return .{ .phase = Phase.fromStr(p) orelse return null };
     }
+    if (std.mem.eql(u8, t, "model_progress")) return .{ .model_progress = .{ .message = getStr(obj, "message") orelse "Preparing voice model…", .downloaded = @intCast(@max(0, getNum(obj, "downloaded_bytes") orelse 0)), .total = @intCast(@max(0, getNum(obj, "total_bytes") orelse 0)) } };
     if (std.mem.eql(u8, t, "metadata")) {
         const key = getStr(obj, "key") orelse return null;
         if (std.mem.eql(u8, key, "backend_resolved")) {
@@ -185,7 +206,7 @@ fn parseJson(obj: std.json.ObjectMap) ?Event {
         .message = getStr(obj, "message") orelse "",
     } };
     if (std.mem.eql(u8, t, "error")) return .{ .err = getStr(obj, "message") orelse "unknown error" };
-    if (std.mem.eql(u8, t, "done")) return .done;
+    if (std.mem.eql(u8, t, "done")) return .{ .done = .{ .output = getStr(obj, "output") orelse "" } };
     if (std.mem.eql(u8, t, "inspection")) {
         const res = obj.get("result") orelse return null;
         if (res != .object) return null;
@@ -196,6 +217,24 @@ fn parseJson(obj: std.json.ObjectMap) ?Event {
 
 fn parseInspection(r: std.json.ObjectMap) Inspection {
     var ins = Inspection{};
+    if (getStr(r, "cover_path")) |v| ins.cover_path = v;
+    if (r.get("sections")) |sections| {
+        if (sections == .array) {
+            ins.section_overflow = sections.array.items.len > MAX_SECTIONS;
+            for (sections.array.items[0..@min(sections.array.items.len, MAX_SECTIONS)]) |entry| {
+                if (entry != .object) continue;
+                const o = entry.object;
+                ins.sections[ins.section_count] = .{
+                    .id = getStr(o, "id") orelse "",
+                    .title = getStr(o, "title") orelse "Untitled section",
+                    .excerpt = getStr(o, "excerpt") orelse "",
+                    .word_count = @intCast(@max(0, getNum(o, "word_count") orelse 0)),
+                    .included = getBool(o, "included") orelse true,
+                };
+                ins.section_count += 1;
+            }
+        }
+    }
     if (getNum(r, "total_chars")) |v| ins.total_chars = @intCast(v);
     if (getNum(r, "total_chunks")) |v| ins.total_chunks = @intCast(v);
     if (getNum(r, "chapter_count")) |v| ins.chapter_count = @intCast(v);
@@ -234,7 +273,7 @@ fn legacy(line: []const u8) ?Event {
     if (std.mem.startsWith(u8, line, "PHASE:")) {
         return .{ .phase = Phase.fromStr(line["PHASE:".len..]) orelse return null };
     }
-    if (std.mem.eql(u8, line, "DONE")) return .done;
+    if (std.mem.eql(u8, line, "DONE")) return .{ .done = .{} };
     if (std.mem.startsWith(u8, line, "CHECKPOINT:")) {
         const rest = line["CHECKPOINT:".len..];
         var it = std.mem.splitScalar(u8, rest, ':');

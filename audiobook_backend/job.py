@@ -1,11 +1,14 @@
 import argparse
+import importlib.metadata
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from checkpoint import CheckpointInspection, get_checkpoint_dir, inspect_checkpoint
 
 from .chunking import split_text_to_chunks
-from .epub_parser import parse_epub
+from .epub_parser import PARSER_VERSION, parse_epub
 from .metadata import apply_metadata_overrides
 from .models import BookMetadata, ParsedEpub
 from .runtime import (
@@ -60,12 +63,42 @@ class JobPreparationDeps:
 DEFAULT_PREPARATION_DEPS = JobPreparationDeps()
 
 
+def _cached_model_revision(repo_id: str) -> str:
+    """Read Hugging Face's cached snapshot identity without making a request."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        cached = try_to_load_from_cache(repo_id, "config.json")
+        if isinstance(cached, str):
+            parts = Path(cached).parts
+            if "snapshots" in parts:
+                index = parts.index("snapshots")
+                if index + 1 < len(parts):
+                    return parts[index + 1]
+    except (ImportError, OSError, ValueError):
+        pass
+    return "unknown"
+
+
 def build_checkpoint_config(
     args: argparse.Namespace,
     resolved_backend: str,
     chunk_chars: int,
     resolved_device: str,
+    selected_section_ids: Optional[list[str]] = None,
 ) -> dict[str, Any]:
+    model_repo, distribution = {
+        "mlx": ("prince-canuma/Kokoro-82M", "mlx-audio"),
+        "pytorch": ("hexgrad/Kokoro-82M", "kokoro"),
+        "mock": ("mock:v1", None),
+    }.get(resolved_backend, (resolved_backend, None))
+    try:
+        model_runtime = importlib.metadata.version(distribution) if distribution else "builtin"
+    except importlib.metadata.PackageNotFoundError:
+        model_runtime = "unavailable"
+    model_identity = f"{resolved_backend}:{model_repo}:{model_runtime}"
+    if distribution:
+        model_identity += ":" + _cached_model_revision(model_repo)
     return {
         "voice": args.voice,
         "speed": args.speed,
@@ -77,6 +110,9 @@ def build_checkpoint_config(
         "format": args.format,
         "bitrate": args.bitrate,
         "normalize": args.normalize,
+        "parser_version": PARSER_VERSION,
+        "selected_section_ids": selected_section_ids,
+        "model_identity": model_identity,
     }
 
 
@@ -113,11 +149,33 @@ def prepare_job(
         )
 
     parsed_epub = deps.parse_epub(args.input, progress_callback=progress_callback)
+    warnings.extend(getattr(parsed_epub, "warnings", []))
     chapters = parsed_epub.chapters
+    sections_file = getattr(args, "sections_file", None)
+    if sections_file:
+        with open(sections_file, encoding="utf-8") as selected_file:
+            selected_ids = json.load(selected_file)
+        if (
+            not isinstance(selected_ids, list)
+            or not selected_ids
+            or any(not isinstance(section_id, str) for section_id in selected_ids)
+            or len(set(selected_ids)) != len(selected_ids)
+        ):
+            raise ValueError("Section selection must be a non-empty JSON list of unique section IDs.")
+        available_ids = {section.section_id for section in parsed_epub.sections}
+        if set(selected_ids) - available_ids:
+            raise ValueError("Section selection contains unknown IDs; inspect this EPUB again.")
+        selected_set = set(selected_ids)
+        for section in parsed_epub.sections:
+            section.included = section.section_id in selected_set
+        chapters = [section for section in parsed_epub.sections if section.included]
+    selected_section_ids = [
+        getattr(chapter, "section_id", "") for chapter in chapters
+    ]
     chunks, chapter_start_indices = deps.split_text_to_chunks(chapters, chunk_chars)
     total_chars = sum(len(chunk.text) for chunk in chunks)
 
-    if not chunks:
+    if not chunks and not getattr(args, "inspect_job", False):
         raise ValueError("No text chunks produced from EPUB.")
 
     book_metadata = parsed_epub.metadata
@@ -129,7 +187,9 @@ def prepare_job(
         checkpoint_status = deps.inspect_checkpoint(
             checkpoint_dir,
             args.input,
-            build_checkpoint_config(args, resolved_backend, chunk_chars, resolved_device),
+            build_checkpoint_config(
+                args, resolved_backend, chunk_chars, resolved_device, selected_section_ids
+            ),
             expected_total_chunks=len(chunks),
         )
         if checkpoint_status.missing_audio_chunks:

@@ -7,6 +7,12 @@ import type { FileJob, TTSConfig } from '../../types/profile.js';
 let lastSelectProps: any;
 let inputHandler: any;
 
+// These cases exercise navigation without the optional Apple GPU screen.
+vi.mock('../../utils/apple-host.js', async () => ({
+    ...await vi.importActual<any>('../../utils/apple-host.js'),
+    isAppleSiliconHost: () => false,
+}));
+
 vi.mock('ink', async () => {
     const actual = await vi.importActual<any>('ink');
     return {

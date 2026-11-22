@@ -59,7 +59,7 @@ npm start --prefix cli
 
 ```bash
 # Python fast tests + coverage gate used in CI
-.venv/bin/python -m pytest -m "not slow" --cov=app --cov-fail-under=75
+.venv/bin/python -m pytest -m "not slow" --cov-reset --cov=audiobook_backend --cov=checkpoint --cov-fail-under=75
 
 # Python subprocess e2e tests
 .venv/bin/python -m pytest tests/e2e
@@ -231,3 +231,28 @@ Minimum docs to review:
 - `README.md`
 - `ARCHITECTURE.md`
 - `CHECKPOINTS.md` and/or `FORMATS_AND_METADATA.md`
+
+
+## Desktop book workflow
+
+The macOS app keeps per-book settings and a versioned library in Application Support.
+`AUDIOBOOK_STATE_DIR` overrides the library location for isolated tests. Its Python
+filesystem/exec boundary is `audiobook_backend.desktop_state`; request files avoid
+Native SDK argument-size limits. Execution and inspection use stable book IDs,
+unique attempt keys, and configuration revisions; stale events must be ignored.
+
+- Default desktop exports are M4B with automatic recovery. Backend CLI defaults remain compatible.
+- `--inspect_job` adds ordered `sections` with stable IDs, excerpts, word counts, and inclusion state.
+- `--sections_file` takes a JSON array of included IDs; generation always keeps EPUB reading order.
+- `--preview --preview_seconds 30` uses production synthesis and emits its actual MP3 path in `done.output`.
+- `--inspect_assets_dir` extracts cover assets; existing title, author, and cover flags remain supported.
+- Output publication defaults to Keep Both; only `--overwrite` permits explicit atomic replacement.
+- `--reset_checkpoint` resets progress synchronously before generation.
+- Parse/model/selection/device identities protect checkpoint reuse; obsolete checkpoints start fresh.
+- `model_progress` and preparation/loading phases report real model readiness. Never fabricate byte counts.
+- On interruption, keep committed chunks and wait for the current attempt's exit before queue advancement.
+
+Run native checks/tests/build with the pinned `@native-sdk/cli@0.4.0`. Optional
+Developer ID signing and notarization use existing SIGNING_IDENTITY/NOTARY_PROFILE
+credentials; see `desktop/packaging/sign-and-notarize.sh`. No test should submit
+artifacts to Apple's service or touch a user's normal library.

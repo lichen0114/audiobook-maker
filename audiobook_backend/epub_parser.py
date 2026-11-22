@@ -1,7 +1,10 @@
+import hashlib
+import posixpath
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import unquote, urldefrag
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 from .chunking import _clean_text, _clean_text_with_paragraphs
 from .models import BookMetadata, ParsedEpub, ParsedSection
@@ -37,6 +40,7 @@ NAV_DOCUMENT_HINT_RE = re.compile(
     r"(^|[\\/._-])(nav|toc|contents?|landmarks?)([\\/._-]|$)",
     re.IGNORECASE,
 )
+PARSER_VERSION = "spine-sections-v1"
 
 
 def _require_epub_support() -> None:
@@ -102,7 +106,7 @@ def _normalize_href_reference(value: Optional[str]) -> str:
     if not value:
         return ""
 
-    normalized = str(value).split("#", 1)[0].strip().lower()
+    normalized = posixpath.normpath(unquote(str(value).split("#", 1)[0].strip()))
     while normalized.startswith("./"):
         normalized = normalized[2:]
     return normalized
@@ -203,11 +207,15 @@ def _is_navigation_document(item: Any) -> bool:
     )
 
 
-def _prune_non_content_nodes(body: Any) -> None:
+def _prune_non_content_nodes(body: Any, *, keep_navigation: bool = False) -> None:
     for node in list(body.find_all(["script", "style"])):
         node.decompose()
 
     for node in list(body.find_all(True)):
+        if node.name is None:  # A parent may already have been decomposed.
+            continue
+        if keep_navigation:
+            continue
         if node.name == "nav":
             node.decompose()
             continue
@@ -247,6 +255,120 @@ def _extract_body_text(soup: BeautifulSoup) -> str:
     return _clean_text_with_paragraphs("\n\n".join(paragraphs))
 
 
+def _item_id(item: Any) -> str:
+    get_id = getattr(item, "get_id", None)
+    value = get_id() if callable(get_id) else ""
+    return value if isinstance(value, str) else ""
+
+
+def _ordered_documents(book: Any) -> tuple[list[tuple[Any, bool]], list[str]]:
+    """Use the spine for reading order; retain auxiliary documents for review."""
+    documents = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+    spine = getattr(book, "spine", None)
+    if not isinstance(spine, (list, tuple)) or not spine:
+        return [(item, True) for item in documents], []
+    by_id = {_item_id(item): item for item in documents if _item_id(item)}
+    ordered: list[tuple[Any, bool]] = []
+    seen: set[str] = set()
+    invalid = False
+    for entry in spine:
+        if isinstance(entry, str):
+            item_id, linear = entry, True
+        elif isinstance(entry, (tuple, list)) and entry:
+            item_id = entry[0]
+            linear = len(entry) < 2 or str(entry[1]).lower() != "no"
+        else:
+            invalid = True
+            continue
+        if not isinstance(item_id, str) or item_id not in by_id:
+            invalid = True
+            continue
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        ordered.append((by_id[item_id], linear))
+    if not ordered:
+        return [(item, True) for item in documents], [
+            "EPUB reading order is malformed; using document order."
+        ]
+    ordered.extend((item, False) for item in documents if _item_id(item) not in seen)
+    return ordered, (["Some EPUB reading-order entries could not be resolved."] if invalid else [])
+
+
+def _fragment_labels(book: Any, item: Any) -> Dict[str, str]:
+    candidates = _get_item_reference_candidates(item)
+    labels: Dict[str, str] = {}
+    toc = getattr(book, "toc", None)
+    if not isinstance(toc, (list, tuple)):
+        return labels
+    for entry in _iter_toc_entries(toc):
+        href = getattr(entry, "href", None)
+        title = getattr(entry, "title", None) or getattr(entry, "text", None)
+        if not isinstance(href, str) or not isinstance(title, str):
+            continue
+        document, fragment = urldefrag(href)
+        if _normalize_href_reference(document) in candidates and fragment:
+            label = _clean_text(title)
+            if label:
+                labels.setdefault(unquote(fragment), label)
+    return labels
+
+
+def _section_texts(
+    soup: BeautifulSoup, fragment_labels: Dict[str, str], *, navigation: bool
+) -> list[tuple[str, str, Optional[str]]]:
+    """Partition a document once in DOM order, including nested fragment anchors."""
+    body = soup.body or soup
+    _prune_non_content_nodes(body, keep_navigation=navigation)
+    available = {
+        str(node.get("id") or node.get("name"))
+        for node in body.find_all(True)
+        if node.get("id") or node.get("name")
+    }
+    if body.get("id") or body.get("name"):
+        available.add(str(body.get("id") or body.get("name")))
+    boundaries = {key: value for key, value in fragment_labels.items() if key in available}
+    if not boundaries and not navigation:
+        text = _extract_body_text(soup)
+        return [("", text, None)] if text else []
+
+    parts: list[tuple[str, list[str], Optional[str]]] = [("", [], None)]
+    used: set[str] = set()
+
+    def visit(node: Any) -> None:
+        if isinstance(node, Comment):
+            return
+        if isinstance(node, NavigableString):
+            parts[-1][1].append(str(node))
+            return
+        if not isinstance(node, Tag):
+            return
+        anchor = str(node.get("id") or node.get("name") or "")
+        if anchor in boundaries and anchor not in used:
+            used.add(anchor)
+            parts.append((anchor, [], boundaries[anchor]))
+        if node.name in SECTION_BLOCK_TAGS or node.name == "br":
+            parts[-1][1].append("\n\n")
+        for child in node.children:
+            visit(child)
+        if node.name in SECTION_BLOCK_TAGS:
+            parts[-1][1].append("\n\n")
+
+    visit(body)
+    result = []
+    for fragment, text_parts, title in parts:
+        text = _clean_text_with_paragraphs("".join(text_parts))
+        if text:
+            result.append((fragment, text, title))
+    return result
+
+
+def _stable_section_id(item: Any, href: str, fragment: str, index: int) -> str:
+    identity = href or _item_id(item) or f"document-{index}"
+    identity = posixpath.normpath(unquote(identity)) + "#" + fragment
+    return "section-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+
+
 def _resolve_section_title(
     item: Any,
     soup: BeautifulSoup,
@@ -281,39 +403,42 @@ def parse_loaded_epub(
     progress_callback: Optional[Callable[[int, int, int], None]] = None,
 ) -> ParsedEpub:
     metadata = _extract_book_metadata(book)
-    chapters: List[ParsedSection] = []
-    document_items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+    sections: List[ParsedSection] = []
+    document_items, warnings = _ordered_documents(book)
     total_items = len(document_items)
     toc_labels = _build_toc_label_map(book)
 
-    for idx, item in enumerate(document_items, start=1):
-        if _is_navigation_document(item):
-            if progress_callback is not None:
-                progress_callback(idx, total_items, len(chapters))
-            continue
-
+    for idx, (item, linear) in enumerate(document_items, start=1):
+        navigation = _is_navigation_document(item)
         soup = BeautifulSoup(item.get_content(), "html.parser")
-        text = _extract_body_text(soup)
-        if text:
-            chapters.append(
+        title = _resolve_section_title(item, soup, toc_labels, len(sections) + 1)
+        href = next(iter(_get_item_reference_candidates(item)), "")
+        for fragment, text, fragment_title in _section_texts(
+            soup, _fragment_labels(book, item), navigation=navigation
+        ):
+            sections.append(
                 ParsedSection(
-                    title=_resolve_section_title(item, soup, toc_labels, len(chapters) + 1),
+                    title=fragment_title or title,
                     text=text,
-                    href=next(iter(_get_item_reference_candidates(item)), ""),
-                    item_id=(
-                        item.get_id()
-                        if callable(getattr(item, "get_id", None))
-                        else ""
-                    ),
+                    href=href + ("#" + fragment if fragment else ""),
+                    item_id=_item_id(item),
+                    section_id=_stable_section_id(item, href, fragment, idx),
+                    included=linear and not navigation,
+                    exclusion_reason="navigation" if navigation else (None if linear else "nonlinear"),
                 )
             )
         if progress_callback is not None:
-            progress_callback(idx, total_items, len(chapters))
+            progress_callback(idx, total_items, sum(section.included for section in sections))
 
-    if not chapters:
+    if not sections:
         raise ValueError("No readable text content found in EPUB.")
 
-    return ParsedEpub(metadata=metadata, chapters=chapters)
+    return ParsedEpub(
+        metadata=metadata,
+        chapters=[section for section in sections if section.included],
+        sections=sections,
+        warnings=warnings,
+    )
 
 
 def parse_epub(

@@ -9,6 +9,12 @@ The backend supports two output formats:
 - `m4b` (audiobook container with chapters and embedded metadata)
 
 Both are exported through direct `ffmpeg` subprocess calls in `app.py`.
+The native desktop app defaults to M4B; the backend and terminal defaults remain MP3.
+
+Both formats are encoded to a temporary sibling file and published only after
+success. Existing output files are preserved by default using numbered Keep Both
+names; `--overwrite` explicitly requests atomic replacement. The final path is
+returned in the backend `done.output` event.
 
 ## MP3 vs M4B at a Glance
 
@@ -57,8 +63,13 @@ M4B export always uses a spool-file path in the current implementation.
 
 - Title from EPUB metadata or `--title`
 - Author from EPUB metadata or `--author`
-- Chapter markers derived from parsed EPUB content documents and final sample offsets
+- Chapter markers derived from selected EPUB sections and final sample offsets
 - Optional cover image from `--cover` or the EPUB cover when present
+
+Sections follow EPUB spine order. Valid TOC fragment targets can split a single
+content document into multiple chapters without duplicate narration. Navigation
+and nonlinear content are excluded by default but can be selected through the
+desktop content review or `--sections_file`.
 
 ### M4B options
 

@@ -3,7 +3,7 @@
 A genuinely native macOS front-end for the Kokoro TTS backend, built on
 [`vercel-labs/native`](https://github.com/vercel-labs/native) (Native SDK).
 It reuses the repo's Python backend (`../app.py`) **unchanged**: the app
-spawns `app.py` with flags and parses its newline-delimited JSON event
+launches `app.py` through an argument-safe Python helper and parses its newline-delimited JSON event
 stream, exactly like the Ink CLI in `../cli`.
 
 - View: `src/app.native` (declarative markup) — a library window, not a wizard.
@@ -13,17 +13,18 @@ stream, exactly like the Ink CLI in `../cli`.
 ## Architecture
 
 ```
-app.native (view)  ──►  Model/Msg/update (main.zig)  ──►  fx.spawn "/bin/sh -c …"
+app.native (view)  ──►  Model/Msg/update (main.zig)  ──►  JSON request → Python launcher
       ▲                          │                                  │
       └── rebuild ◄── fold ◄── EffectLine / EffectExit ◄── app.py JSON events
 ```
 
-The effects channel caps argv at 16 entries and exposes no env/cwd knob, so
-every backend call is routed through `/bin/sh -c "<command>"` (see `shell.zig`),
-which also carries the `cd <root>`, the environment assignments, and POSIX
-quoting. All filesystem work (root detection, `*.epub` listing, checkpoint
-deletion) is done in that shell — Zig 0.16 puts `std.fs` behind `std.Io`, which
-`update` never sees.
+Backend requests are written as JSON via the SDK file effects, then
+`audiobook_backend/desktop_state.py run` prepares the section selection and
+replaces itself with the backend. This avoids the SDK's 16-argument / 2 KiB
+argv limits and preserves filenames and Unicode exactly. Boot checks still
+use the quoted shell helper. User pause and skip actions signal the exact
+attempt with SIGTERM and wait for its terminal event; per-attempt stop
+markers cover cancellation before the backend has started.
 
 Module map (Zig ports of the CLI's TypeScript utils):
 
@@ -63,7 +64,7 @@ backend, ad-hoc signs, and produces the DMG. CI does the same on every `v*` tag
 
 ```sh
 native dev      # build + run with markup hot reload
-native test     # 15 unit tests (argv, event parser, shell quoting, views, update)
+native test     # native unit and lifecycle regression tests (argv, event parser, shell quoting, views, update)
 native build    # ReleaseFast binary → zig-out/bin/
 native check    # validate src/app.native + app.zon against the model contract
 native package --target macos --signing identity --identity "Developer ID Application: …"
@@ -76,35 +77,51 @@ install if the Python venv, Kokoro, or FFmpeg are missing (`../setup.sh`).
 
 ## What works
 
-- Boot detection (project root + interpreter + `hw.memsize` + preflight) in one spawn.
-- Setup gate mirroring the CLI's `SetupRequired`, with per-check fix hints.
-- Add books via the native file picker (`osascript choose file`) or a path field;
-  directories are scanned with `ls`.
-- Automatic per-book inspection (`--inspect_job`) → chapters / chars / chunks /
-  resolved backend / checkpoint status.
-- Batch config (voice, speed, format, bitrate, normalize, backend, GPU, checkpoint).
-- Sequential conversion queue with live phase / % / per-file progress, streamed
-  from the backend's JSON events; native completion notification + Reveal in Finder.
-- Checkpoint **resume / start-fresh** choice; duplicate-output **blocking**.
+- A persistent library under `~/Library/Application Support/Audiobook Maker`,
+  with atomic JSON saves, corrupt-state backups, per-book settings, and saved
+  section selections. Set `AUDIOBOOK_STATE_DIR` for isolated testing.
+- EPUB import with spine reading order, cover thumbnails, title/author edits,
+  cover replacement, estimated listening time and temporary disk use, and an
+  expandable list of included sections and text samples.
+- Narrator picker, bounded speed controls, and a cached preview of up to 30
+  seconds from the first included section; separate sample and audiobook
+  playback with Stop controls.
+- M4B with chapters and automatic progress saving by default. MP3 and advanced
+  engine/quality controls remain available.
+- Per-book output folder selection, remembered for new books. The initial
+  destination is `~/Music/Audiobook Maker`. Existing files are kept by default;
+  the library tracks the actual filename returned by the exporter.
+- Primary **Create Audiobook** for the selected book, **Create All** for the
+  batch, and explicit **Apply Settings to Unstarted Books**. Running jobs use
+  immutable request snapshots.
+- **Pause and Save** (or **Stop Queue** if progress saving was disabled),
+  **Skip Current**, **Cancel Preview**, and **Retry This Book**. Pausing never
+  starts the next book. Relaunch restores the library and inspects checkpoints;
+  it does not automatically restart conversion.
+- Model preparation/loading phases and real download byte counts when the
+  model host supplies a total, plus actionable per-book errors.
+- Missing-source relinking, native completion notification, and Reveal in Finder.
+- Stable book IDs and unique attempt keys; obsolete process events cannot
+  mutate a different book after a list change or retry.
 
-Verified end-to-end: 16/16 Zig tests; the real backends drive a full conversion
-(PyTorch and MLX, MP3 + M4B with chapters); the packaged `.app` runs completely
-self-contained (its own Python + MLX + espeak + ffmpeg, no repo, no system deps)
-and produces a valid MP3 when driven through its GUI via the automation harness.
+## Verification and limits
 
-## Deferred (documented, not yet built)
+`native test` covers configuration, event parsing, shell quoting, rendering,
+per-book isolation, immutable running settings, pause acknowledgement, stale
+attempt events, restored jobs/IDs, and selected-book request snapshots. Python
+unit tests cover atomic library writes, corrupt-state recovery, launcher
+argument fidelity, and the stop-before-launch race.
 
-- **Apple-Silicon recovery ladder** — the CLI's retry-with-safer-profile on a
-  recoverable native crash (`tts-runner.ts:runTTS`). The hook (per-book error
-  state + `EffectExit.reason`) is in place; the retry loop is not wired yet.
-- **Cover art thumbnails** — needs a small backend addition (`--dump_cover
-  <path>` emitting `metadata:cover_path`); today the detail pane shows a glyph.
-- **Inline M4B title/author overrides** — chapters + metadata already flow from
-  the EPUB; editable override fields are not built (would add per-book
-  `TextBuffer`s).
-- **Notarization** — the DMG is ad-hoc signed (Gatekeeper right-click-Open on
-  first launch). A Developer ID + `xcrun notarytool` step would make it open
-  cleanly; wire it into `.github/workflows/release.yml` when an account exists.
-- **First-run model download UX** — the first conversion silently downloads the
-  ~330 MB voice model (appears to sit at "Generating speech"); a dedicated
-  "Preparing…" state would be friendlier.
+The library currently holds up to 24 books and reports the limit explicitly.
+Up to 96 sections can be reviewed individually. Larger books show a warning
+and use the backend's default reading selection. The disk/time numbers are
+rough estimates, not guaranteed requirements or measured completion times.
+Playback is basic Play/Stop using macOS audio support, without seeking or a
+waveform. Ordinary EPUB imports use the native picker or path entry; drag and
+drop is not implemented.
+
+Signing/notarization still requires a Developer ID account. The package remains
+ad-hoc signed unless release credentials are configured. The packaged app is
+MLX-only; it does not offer the development CLI's PyTorch CPU recovery ladder.
+Model-host networking errors are shown with retry guidance; preparation retries
+reuse files already cached by the model host.

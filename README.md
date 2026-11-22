@@ -15,6 +15,12 @@ required (everything is bundled; the first conversion downloads the ~330 MB voic
 Apple Silicon only; it's an unsigned build, so on first launch right-click the app → Open.
 See [`desktop/README.md`](desktop/README.md) to build it yourself.
 
+The desktop workflow is a saved library: add EPUBs, review what will be read,
+preview a short passage with your narrator, and create an audiobook. Desktop
+defaults to M4B with chapters and resumable processing; the scripting CLI keeps
+its existing MP3 and checkpoint-off defaults. Backend, GPU, and encoding options
+are available in Advanced settings.
+
 ## Documentation
 
 - `README.md`: setup, usage, examples, and testing
@@ -33,6 +39,9 @@ See [`desktop/README.md`](desktop/README.md) to build it yourself.
 - Auto backend selection (`auto`, `pytorch`, `mlx`, `mock`)
 - Structured JSON or legacy text events for integrations
 - Direct `ffmpeg` export pipeline, including a streaming MP3 path when checkpoints are off
+- EPUB spine reading order, selectable content sections, and TOC fragment chapters
+- Short narrator samples from the selected book, cached by synthesis settings
+- Atomic checkpoint and output writes; existing output files are kept by default
 
 ## Quick Start (macOS)
 
@@ -145,6 +154,14 @@ Common examples:
 .venv/bin/python app.py --inspect_job --event_format json \
   --input book.epub --output book.mp3
 
+# Make a sample of up to 30 seconds from the first selected section
+.venv/bin/python app.py --preview --preview_seconds 30 --event_format json \
+  --input book.epub --output ./samples/book.mp3
+
+# Use a JSON list of section IDs from the inspection result
+.venv/bin/python app.py --sections_file ./selected-sections.json \
+  --format m4b --input book.epub --output book.m4b
+
 # Extract EPUB metadata only
 .venv/bin/python app.py --extract_metadata --input book.epub --output /dev/null
 
@@ -173,6 +190,12 @@ Common examples:
 | `--resume` | off | Attempts to reuse an existing compatible checkpoint |
 | `--check_checkpoint` | off | Reports checkpoint existence and hash compatibility, then exits |
 | `--inspect_job` | off | Emits metadata, chunk estimates, warnings, and full resume compatibility |
+| `--sections_file` | none | JSON list of unique section IDs to narrate, kept in EPUB reading order |
+| `--inspect_assets_dir` | none | Writes an extracted cover asset during inspection and returns its path |
+| `--preview` | off | Generates a short MP3 sample from the first selected section; `done.output` gives its path |
+| `--preview_seconds` | `30` | Maximum preview duration, greater than `0` and at most `30` seconds |
+| `--overwrite` | off | Explicitly replace an existing output; otherwise Keep Both chooses a numbered filename |
+| `--reset_checkpoint` | off | Explicitly discard the current output's checkpoint before conversion |
 | `--pipeline_mode` | omitted | Accepted values are `sequential` or `overlap3`; omitted currently resolves to `sequential` |
 | `--prefetch_chunks` | `2` | `overlap3` tuning |
 | `--pcm_queue_size` | `4` | `overlap3` tuning |
@@ -182,6 +205,18 @@ Common examples:
 | `--no_checkpoint` | off | Deprecated no-op; checkpointing is already opt-in |
 
 ## Output Formats and Metadata
+
+EPUB content follows the spine rather than manifest order. Navigation and
+nonlinear documents are excluded by default but remain available for selection.
+Valid TOC fragment targets split a content document into chapters without
+reading its text twice. If a malformed spine cannot be resolved, parsing falls back to
+document order and reports a warning. Inspection exposes every readable section's
+stable ID, title, word count, excerpt, and inclusion state.
+
+Export is written to a hidden temporary sibling file and published only after
+encoding succeeds. By default an existing `book.m4b` is preserved and the new
+file becomes `book (2).m4b`; integrations should use the final `done.output`
+path. `--overwrite` opts into replacing the destination after successful export.
 
 ### MP3
 
@@ -224,6 +259,15 @@ Resume only succeeds when the checkpoint matches:
 - The EPUB file hash
 - Key generation and export settings such as voice, speed, backend, chunking, format, bitrate, and normalization
 - The chunk count produced by the current parse and chunking pass
+- Parser version, selected section IDs, and model/runtime identity
+
+Manifests and chunk files are saved atomically. Missing or corrupt saved audio
+is regenerated. The model identity includes the backend, model repository,
+installed synthesis package version, and locally cached model snapshot commit
+when available. Inspection never downloads a model to resolve its identity;
+uncached snapshots are recorded as unknown. Model downloads are not pinned.
+Checkpoints from older parser schemas start fresh rather than reuse audio for
+different content boundaries.
 
 The interactive CLI uses `--inspect_job` during planning to choose whether each job should resume, start fresh, or ignore checkpoint data.
 
@@ -261,8 +305,8 @@ Install `requirements-dev.txt` before running the Python test commands below. `p
 ### Python
 
 ```bash
-# Fast suite; CI also enforces --cov-fail-under=75
-.venv/bin/python -m pytest -m "not slow" --cov=app --cov-fail-under=75
+# Fast suite; coverage measures the implementation, including checkpoint persistence
+.venv/bin/python -m pytest -m "not slow" --cov-reset --cov=audiobook_backend --cov=checkpoint --cov-fail-under=75
 
 # Subprocess E2E tests
 .venv/bin/python -m pytest tests/e2e
@@ -288,7 +332,41 @@ Current CLI coverage thresholds (`cli/vitest.config.ts`):
 
 `.github/workflows/tests.yml` runs:
 - A fast job on pull requests and pushes: Python tests, CLI tests, and CLI coverage
+- A macOS native test and markup-validation job on the pinned Native SDK
 - A slow Python test job on schedule or manual dispatch
+
+Release builds also smoke-test the bundled Python and FFmpeg outside the checkout
+with mock MP3 and M4B conversions before uploading artifacts. This validates the
+packaged conversion path without downloading a model; real-model and desktop
+accessibility checks remain manual release checks.
+
+### Optional signed distribution
+
+The default build remains ad-hoc signed. Developer ID distribution requires a
+Mac with Xcode's `notarytool` and `stapler`, an existing **Developer ID Application**
+certificate and private key in an accessible keychain, and an existing
+`notarytool` keychain profile. Follow [Apple's notarization guide](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+to provision these separately. The packaging scripts do not create credentials
+or modify keychain configuration.
+
+```bash
+SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
+NOTARY_PROFILE='audiobook-maker-release' \
+desktop/packaging/package.sh
+```
+
+This signs nested code and the app with the hardened runtime and secure
+timestamps, submits a temporary ZIP to Apple, and staples the accepted ticket
+to the app before assembling the DMG. It then signs, notarizes, and staples
+that DMG. Both environment variables are required; rejected submissions fail
+the build. The bundled Python interpreter receives the specific DYLD environment
+entitlement needed by the relocated espeak dependency.
+
+To use the step separately, run
+`desktop/packaging/sign-and-notarize.sh /absolute/path/AudiobookMaker.app`, create
+a DMG from that signed and stapled app, then run the same script with the DMG
+path. Signing and notarization require credentials and have not been exercised
+by the mock conversion tests.
 
 ## Architecture
 

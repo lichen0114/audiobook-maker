@@ -45,13 +45,30 @@ jobs:
         run: npm ci --prefix cli
 
       - name: Run Python tests (not slow)
-        run: .venv/bin/python -m pytest -m "not slow" --cov=app --cov-fail-under=75
+        run: .venv/bin/python -m pytest -m "not slow" --cov-reset --cov=audiobook_backend --cov=checkpoint --cov-report=term-missing --cov-fail-under=75
 
       - name: Run CLI tests
         run: npm test --prefix cli
 
       - name: Run CLI coverage
         run: npm run test:coverage --prefix cli
+
+  native-tests:
+    name: macOS native UI
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install the pinned Native SDK CLI
+        run: npm install -g @native-sdk/cli@0.4.0
+      - name: Run native state and view tests
+        working-directory: desktop
+        run: native test --yes
+      - name: Validate markup against the built model contract
+        working-directory: desktop
+        run: native check
 
   slow-tests:
     name: Python slow tests

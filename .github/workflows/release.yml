@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   package:
-    runs-on: macos-14 # Apple Silicon runner (arm64)
+    runs-on: macos-15 # Apple Silicon runner (arm64)
     steps:
       - uses: actions/checkout@v4
 
@@ -27,10 +27,54 @@ jobs:
       - name: Install espeak-ng (bundled, relocated by the packager)
         run: brew install espeak-ng
 
+      - name: Test native state, views, and markup
+        working-directory: desktop
+        run: |
+          native test --yes
+          native check
+
       - name: Build AudiobookMaker.app + .dmg
         run: ./desktop/packaging/package.sh
         env:
           VERSION: ${{ github.ref_name }}
+
+      - name: Smoke test the bundled runtime outside the checkout
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          resources = Path('desktop/dist/AudiobookMaker.app/Contents/Resources').resolve()
+          python = resources / 'python/bin/python3'
+          backend = resources / 'backend/app.py'
+          sample = Path('tests/fixtures/sample.epub').resolve()
+          env = dict(os.environ)
+          env['PATH'] = str(resources) + os.pathsep + env.get('PATH', '')
+          env['DYLD_LIBRARY_PATH'] = str(resources)
+          with tempfile.TemporaryDirectory() as work:
+              for output_format in ('mp3', 'm4b'):
+                  output = Path(work) / ('smoke.' + output_format)
+                  command = [str(python), str(backend), '--input', str(sample),
+                             '--output', str(output), '--backend', 'mock',
+                             '--format', output_format, '--checkpoint',
+                             '--event_format', 'json', '--no_rich']
+                  inspection = subprocess.run(command + ['--inspect_job'], env=env,
+                                              cwd=work, text=True, capture_output=True,
+                                              check=True, timeout=60)
+                  event = next(json.loads(line) for line in inspection.stdout.splitlines()
+                               if json.loads(line).get('type') == 'inspection')
+                  assert event['result']['chapter_count'] > 0
+                  assert event['result']['sections']
+                  subprocess.run(command, env=env, cwd=work, check=True, timeout=120)
+                  assert output.stat().st_size > 0
+                  assert not Path(str(output) + '.checkpoint').exists()
+                  subprocess.run([str(resources / 'ffmpeg'), '-v', 'error', '-i',
+                                  str(output), '-f', 'null', '-'], env=env, cwd=work,
+                                 check=True, timeout=60)
+          PY
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

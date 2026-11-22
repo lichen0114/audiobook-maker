@@ -12,7 +12,7 @@ export interface WorkerStatus {
     details: string;
 }
 
-export type ProcessingPhase = 'PARSING' | 'INFERENCE' | 'CONCATENATING' | 'EXPORTING' | 'DONE';
+export type ProcessingPhase = 'PARSING' | 'PREPARING_MODEL' | 'LOADING_MODEL' | 'INFERENCE' | 'CONCATENATING' | 'EXPORTING' | 'DONE';
 export type ResolvedBackend = 'pytorch' | 'mlx' | 'mock';
 export type EffectivePipelineMode = Exclude<PipelineModeOption, 'auto'>;
 
@@ -28,6 +28,7 @@ export interface RecoveryInfo {
 }
 
 export interface ProgressInfo {
+    outputPath?: string;
     progress: number;
     currentChunk: number;
     totalChunks: number;
@@ -58,6 +59,7 @@ export interface ParserState {
 }
 
 interface JsonEvent {
+    output?: string;
     type: string;
     phase?: string;
     key?: string;
@@ -115,6 +117,8 @@ const NON_RECOVERABLE_FAILURE_MARKERS = [
 
 const PROCESSING_PHASES: ProcessingPhase[] = [
     'PARSING',
+    'PREPARING_MODEL',
+    'LOADING_MODEL',
     'INFERENCE',
     'CONCATENATING',
     'EXPORTING',
@@ -195,6 +199,10 @@ export function parseOutputLine(line: string, state: ParserState): ProgressInfo 
                 state.lastParseTotalItems = event.total_items;
                 state.lastParseChapterCount = event.current_chapter_count;
                 return buildProgressInfo(state);
+            }
+
+            if (event.type === 'done' && typeof event.output === 'string') {
+                return buildProgressInfo(state, { outputPath: event.output });
             }
 
             if (event.type === 'timing' && typeof event.chunk_timing_ms === 'number') {

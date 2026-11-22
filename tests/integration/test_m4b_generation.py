@@ -105,7 +105,11 @@ class TestM4BGeneration:
             mock_which.return_value = "/usr/bin/ffmpeg"
 
             with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+                def successful_encode(cmd, **kwargs):
+                    Path(cmd[-1]).write_bytes(b"encoded audio")
+                    return MagicMock(returncode=0, stderr=b"")
+
+                mock_run.side_effect = successful_encode
 
                 # Create test data
                 pcm_data = np.random.randint(-32768, 32767, size=48000, dtype=np.int16)
@@ -131,7 +135,9 @@ class TestM4BGeneration:
                 # Check essential arguments
                 assert "-c:a" in cmd and "aac" in cmd
                 assert "-movflags" in cmd and "+faststart" in cmd
-                assert output_path in cmd
+                assert cmd[-1] != output_path
+                assert Path(cmd[-1]).parent == Path(output_path).parent
+                assert Path(output_path).read_bytes() == b"encoded audio"
 
                 # Check cover was included
                 assert "-disposition:v:0" in cmd

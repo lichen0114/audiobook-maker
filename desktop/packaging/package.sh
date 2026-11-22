@@ -21,6 +21,14 @@ BUNDLE_ID="dev.native_sdk.audiobook_maker"
 VERSION="${VERSION:-0.1.0}"
 PY_SERIES="3.12"
 
+# Fail before building or downloading when release signing is only half configured.
+if [ -n "${SIGNING_IDENTITY:-}" ] || [ -n "${NOTARY_PROFILE:-}" ]; then
+  [ -n "${SIGNING_IDENTITY:-}" ] && [ -n "${NOTARY_PROFILE:-}" ] || {
+    echo "SIGNING_IDENTITY and NOTARY_PROFILE must both be set for signed distribution." >&2
+    exit 1
+  }
+fi
+
 DESKTOP="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="$(cd "$DESKTOP/.." && pwd)"
 DIST="$DESKTOP/dist"
@@ -128,14 +136,21 @@ cp -R "$REPO/audiobook_backend" "$REPO/backends" "$RES/backend/"
 find "$RES" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
 find "$RES/python" -type d -name "test" -prune -exec rm -rf {} + 2>/dev/null || true
 
-echo "==> [7/8] ad-hoc code-signing"
-codesign --force --deep --sign - --timestamp=none "$APP" >/dev/null 2>&1 || \
-  echo "    (codesign warning ignored; ad-hoc signature applied where possible)"
+echo "==> [7/8] code-signing"
+if [ -n "${SIGNING_IDENTITY:-}" ]; then
+  bash "$DESKTOP/packaging/sign-and-notarize.sh" "$APP"
+else
+  codesign --force --deep --sign - --timestamp=none "$APP" >/dev/null 2>&1 || \
+    echo "    (codesign warning ignored; ad-hoc signature applied where possible)"
+fi
 
 echo "==> [8/8] building the DMG"
 DMG="$DIST/AudiobookMaker.dmg"
 rm -f "$DMG"
 hdiutil create -volname "$APP_DISPLAY" -srcfolder "$APP" -ov -format UDZO "$DMG" >/dev/null
+if [ -n "${SIGNING_IDENTITY:-}" ]; then
+  bash "$DESKTOP/packaging/sign-and-notarize.sh" "$DMG"
+fi
 
 APP_SIZE=$(du -sh "$APP" | awk '{print $1}')
 DMG_SIZE=$(du -sh "$DMG" | awk '{print $1}')

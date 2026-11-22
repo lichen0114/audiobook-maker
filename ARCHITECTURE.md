@@ -4,14 +4,44 @@ This document describes how AI Audiobook Fast is structured and how the current 
 
 ## Overview
 
-The project is a process-based system with a terminal UI frontend and a Python backend:
+The project is a process-based system with native macOS and terminal frontends
+sharing a Python backend:
 
+- `desktop/` (Zig + Native SDK): persistent book library, content review, narrator preview, sequential conversion queue, and completion actions
 - `cli/` (TypeScript + Ink): user workflow, batch planning, batch review, execution UI, and recovery logic
 - `app.py` (Python): EPUB parsing, text chunking, TTS generation, checkpointing, and `ffmpeg` export
 - `backends/` (Python): pluggable TTS backends (`pytorch`, `mlx`, `mock`)
 - `checkpoint.py` (Python): checkpoint state, chunk persistence, validation, and inspection
 
 The interactive CLI launches the Python backend as a subprocess and consumes backend events from `stdout` and `stderr`.
+
+The native app uses the same JSON event stream. Its default format is M4B with
+checkpointing enabled; direct backend and terminal defaults remain unchanged.
+Per-book section selections are passed as a JSON file through `--sections_file`.
+Cover extraction is opt-in during inspection through `--inspect_assets_dir`.
+
+## EPUB Content and Preview
+
+The parser walks spine references in reading order and deduplicates repeated
+references. Nonlinear and unspined documents remain inspectable but are excluded
+from default narration, as are navigation documents. A missing spine uses document
+order; an unusable or partially unresolved spine also produces a warning.
+
+TOC fragment targets partition each document in DOM order. Text is traversed once,
+so nested anchors and repeated TOC links never duplicate narration. Missing anchors
+leave the containing document intact. Every readable section has a deterministic
+ID derived from its document reference and fragment, a title, word count, excerpt,
+and default inclusion state. `ParsedEpub.sections` contains all candidates;
+`chapters` contains the default narration set. Job preparation validates an optional
+JSON list of IDs and uses the chosen sections in reading order for synthesis.
+
+Preview uses the production backend and the first 100 words of the first selected
+section, with PCM truncated to at most `--preview_seconds` (maximum 30 seconds).
+Its cache key includes excerpt text, synthesis configuration, section selection,
+model/runtime identity, and requested duration. Preview writes its own MP3 and
+manifest and emits `done` with `preview=true` and the actual output path. It does
+not advance a conversion checkpoint. Model preparation/loading phases and
+heartbeats apply to both previews and full conversions.
 
 ## High-Level Runtime Flow
 
@@ -253,6 +283,14 @@ Two paths exist:
 
 Runtime export is `ffmpeg`-first. `pydub` is present in the dependency set but is not the primary export mechanism.
 
+Both stream and spool exports encode into a hidden sibling temporary file.
+Successful default publication uses an exclusive filesystem operation and a
+numbered Keep Both filename if another file already occupies the destination.
+`--overwrite` uses atomic replacement after encoding. Export helpers return the
+actual path, and the backend forwards it in `done.output`. Streaming FFmpeg stderr
+is drained independently with bounded retained diagnostics so its pipe cannot
+block long-running encoding.
+
 ### Completion and cleanup
 
 On success:
@@ -295,6 +333,17 @@ Resume proceeds only when:
 - Chunk count matches the current chunking output
 
 Missing chunk audio files are treated as recoverable. The runtime removes those chunks from the completed set and regenerates them.
+
+Checkpoint manifests and `.npy` chunk audio are flushed to temporary sibling
+files before atomic publication. A truncated or invalid manifest is ignored;
+missing or corrupt audio is regenerated. Compatibility also includes
+`parser_version`, ordered `selected_section_ids`, and `model_identity` so parser
+or selection changes cannot silently reuse different spoken content. Model identity
+records the model repository, installed synthesis package version, and the
+locally cached model snapshot commit when available. Reading this cache never
+requires network access; unknown snapshots remain explicit. Downloads are not
+pinned to a model-weight commit. Older checkpoints missing these fields are
+incompatible with a new parse.
 
 ## IPC and Event Protocol
 

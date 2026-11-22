@@ -12,6 +12,8 @@ import * as path from 'path';
 const PHASES: ProcessingPhase[] = ['PARSING', 'INFERENCE', 'CONCATENATING', 'EXPORTING'];
 const PHASE_LABELS: Record<ProcessingPhase, string> = {
     PARSING: 'Parsing',
+    PREPARING_MODEL: 'Preparing voice model',
+    LOADING_MODEL: 'Loading voice model',
     INFERENCE: 'Inference',
     CONCATENATING: 'Concatenating',
     EXPORTING: 'Exporting',
@@ -498,6 +500,10 @@ export function BatchProgress({ files, setFiles, jobPlans, onComplete }: BatchPr
                         job.outputPath,
                         job.config,
                         (progressInfo: ProgressInfo) => {
+                            if (progressInfo.outputPath) {
+                                job.outputPath = progressInfo.outputPath;
+                                patchFile(index, (file) => ({ ...file, outputPath: progressInfo.outputPath! }));
+                            }
                             if (progressInfo.recovery) {
                                 recoveryInfoRef.current = progressInfo.recovery;
                                 hasRecoveryUpdate.current = true;

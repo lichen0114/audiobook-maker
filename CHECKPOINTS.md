@@ -5,6 +5,7 @@ This guide explains how resumable processing works in AI Audiobook Fast.
 ## Summary
 
 Checkpointing is optional. When enabled, the backend stores per-chunk audio plus job metadata so an interrupted run can resume later.
+The native desktop app enables it by default; direct backend and terminal defaults remain off.
 
 Checkpoint data lives in a directory next to the output file:
 
@@ -25,6 +26,7 @@ Examples:
 | `--resume` | Attempt to reuse an existing compatible checkpoint |
 | `--check_checkpoint` | Report checkpoint existence and EPUB hash compatibility, then exit |
 | `--inspect_job` | Emit full checkpoint compatibility plus job estimates, warnings, and metadata |
+| `--reset_checkpoint` | Explicitly discard this output's checkpoint before a new conversion |
 | `--no_checkpoint` | Deprecated no-op; checkpointing is already opt-in |
 
 ## Typical Workflows
@@ -90,6 +92,9 @@ The backend stores:
 ### Chunk audio (`chunk_*.npy`)
 
 Each completed chunk is stored as a NumPy array, `int16` in practice.
+Chunks and manifests are published atomically from flushed temporary sibling files.
+An interrupted write preserves the last complete manifest; corrupt saved audio is
+treated as missing and regenerated.
 
 This lets the backend reuse generated chunks during resume and still produce final output without rerunning TTS for completed chunks.
 
@@ -139,6 +144,14 @@ Validation requires all of the following to match:
 - `format`
 - `bitrate`
 - `normalize`
+- `parser_version`
+- ordered `selected_section_ids`
+- `model_identity` (backend, model repository, installed runtime package version, and cached model snapshot commit when available)
+
+An uncached model has an unknown snapshot identity until it is downloaded;
+inspection reads the local cache without making network requests. Downloads
+are not pinned to a model-weight commit. Older checkpoints without the
+parser/selection/model fields are incompatible with newly parsed jobs and start fresh.
 
 Additional runtime checks:
 - `total_chunks` must match the current chunking output or the checkpoint is rejected as `chunk_mismatch`
@@ -225,7 +238,7 @@ What to know:
 
 ### I want resumability for long jobs by default
 
-Current default is checkpointing off for performance and simplicity.
+The native desktop app defaults to checkpointing on. Direct backend and terminal defaults are off.
 
 Use one of these:
 - Direct backend: add `--checkpoint`

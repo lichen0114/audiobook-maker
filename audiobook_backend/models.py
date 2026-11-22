@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import re
 from typing import Any, Dict, List, Optional
 
 
@@ -22,12 +23,28 @@ class ParsedSection:
     text: str
     href: str = ""
     item_id: str = ""
+    section_id: str = ""
+    included: bool = True
+    exclusion_reason: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.section_id,
+            "title": self.title,
+            "word_count": len(self.text.split()),
+            "excerpt": re.sub(r"\s+", " ", self.text).strip()[:240],
+            "included": self.included,
+            "href": self.href,
+            "exclusion_reason": self.exclusion_reason,
+        }
 
 
 @dataclass
 class ParsedEpub:
     metadata: BookMetadata
     chapters: List[ParsedSection]
+    sections: List[ParsedSection] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -53,6 +70,8 @@ class JobInspectionResult:
     checkpoint: Dict[str, Any]
     warnings: List[str]
     errors: List[str]
+    sections: List[Dict[str, Any]] = field(default_factory=list)
+    cover_path: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -70,5 +89,7 @@ class JobInspectionResult:
             "checkpoint": self.checkpoint,
             "warnings": self.warnings,
             "errors": self.errors,
+            "sections": self.sections,
+            "cover_path": self.cover_path,
         }
 

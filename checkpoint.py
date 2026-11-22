@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -61,11 +62,45 @@ def get_checkpoint_dir(output_path: str) -> str:
 
 
 def save_checkpoint(checkpoint_dir: str, state: CheckpointState) -> None:
-    """Save checkpoint state to disk."""
+    """Publish a complete manifest without truncating the last good checkpoint."""
     os.makedirs(checkpoint_dir, exist_ok=True)
     state_path = os.path.join(checkpoint_dir, 'state.json')
-    with open(state_path, 'w') as f:
-        json.dump(state.to_dict(), f, indent=2)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='w', encoding='utf-8', dir=checkpoint_dir,
+            prefix='.state-', suffix='.tmp', delete=False,
+        ) as f:
+            temp_path = f.name
+            json.dump(state.to_dict(), f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, state_path)
+        _sync_directory(checkpoint_dir)
+    finally:
+        if temp_path is not None:
+            _remove_if_present(temp_path)
+
+
+def _remove_if_present(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+def _sync_directory(path: str) -> None:
+    """Persist a rename when directory fsync is supported by the filesystem."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        # Some filesystems do not support syncing directories. The file itself
+        # is already synced and the rename is still atomic.
+        pass
 
 
 def load_checkpoint(checkpoint_dir: str) -> Optional[CheckpointState]:
@@ -82,10 +117,24 @@ def load_checkpoint(checkpoint_dir: str) -> Optional[CheckpointState]:
 
 
 def save_chunk_audio(checkpoint_dir: str, chunk_idx: int, audio: np.ndarray) -> None:
-    """Save a single chunk's audio data to the checkpoint directory."""
+    """Publish chunk audio before the manifest may reference it."""
     os.makedirs(checkpoint_dir, exist_ok=True)
     chunk_path = os.path.join(checkpoint_dir, f'chunk_{chunk_idx:06d}.npy')
-    np.save(chunk_path, audio)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=checkpoint_dir, prefix=f'.chunk-{chunk_idx:06d}-',
+            suffix='.tmp', delete=False,
+        ) as f:
+            temp_path = f.name
+            np.save(f, audio, allow_pickle=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, chunk_path)
+        _sync_directory(checkpoint_dir)
+    finally:
+        if temp_path is not None:
+            _remove_if_present(temp_path)
 
 
 def load_chunk_audio(checkpoint_dir: str, chunk_idx: int) -> Optional[np.ndarray]:
@@ -94,8 +143,8 @@ def load_chunk_audio(checkpoint_dir: str, chunk_idx: int) -> Optional[np.ndarray
     if not os.path.exists(chunk_path):
         return None
     try:
-        return np.load(chunk_path)
-    except (IOError, ValueError):
+        return np.load(chunk_path, allow_pickle=False)
+    except (IOError, ValueError, EOFError):
         return None
 
 
@@ -144,8 +193,12 @@ def inspect_checkpoint(
         'speed',
         'lang_code',
         'backend',
+        'device',
         'chunk_chars',
         'split_pattern',
+        'parser_version',
+        'selected_section_ids',
+        'model_identity',
         'format',
         'bitrate',
         'normalize',

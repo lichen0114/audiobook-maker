@@ -1,6 +1,7 @@
 """Tests for backend resolution, event emission, and ffmpeg stream helpers."""
 
 import json
+import io
 import subprocess
 import sys
 from pathlib import Path
@@ -348,13 +349,18 @@ class TestMp3StreamHelpers:
         with pytest.raises(FileNotFoundError):
             app.open_mp3_export_stream("out.mp3")
 
-    def test_open_mp3_export_stream_builds_ffmpeg_command(self, monkeypatch):
-        popen_mock = MagicMock(return_value=MagicMock())
+    def test_open_mp3_export_stream_builds_ffmpeg_command(self, monkeypatch, tmp_path):
+        from audiobook_backend.export import discard_mp3_export_stream
+
+        proc = MagicMock()
+        proc.stderr = io.BytesIO(b"")
+        popen_mock = MagicMock(return_value=proc)
         monkeypatch.setattr(app.shutil, "which", lambda _: "/usr/bin/ffmpeg")
         monkeypatch.setattr(app.subprocess, "Popen", popen_mock)
 
+        output_path = tmp_path / "out.mp3"
         app.open_mp3_export_stream(
-            "out.mp3",
+            str(output_path),
             sample_rate=44100,
             bitrate="128k",
             normalize=True,
@@ -366,7 +372,11 @@ class TestMp3StreamHelpers:
         assert "-ar" in cmd and "44100" in cmd
         assert "-af" in cmd
         assert "loudnorm=I=-14:TP=-1:LRA=11" in cmd
-        assert cmd[-1] == "out.mp3"
+        assert cmd[-1] != str(output_path)
+        assert Path(cmd[-1]).parent == tmp_path
+        assert cmd[-1].endswith(".partial.mp3")
+        assert "-nostats" in cmd
+        discard_mp3_export_stream(proc)
 
     def test_close_mp3_export_stream_closes_stdin_and_waits(self):
         proc = SimpleNamespace(

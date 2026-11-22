@@ -131,3 +131,12 @@ PHASE:EXPORTING`;
         expect(updates.some((u) => u.currentChunk === 1 && u.totalChunks === 3)).toBe(true);
     });
 });
+
+describe('desktop-compatible backend additions', () => {
+    it('reports model preparation phases and the actual safely published output', () => {
+        const state = createParserState();
+        expect(parseOutputLine(JSON.stringify({type: 'phase', phase: 'PREPARING_MODEL'}), state)?.phase).toBe('PREPARING_MODEL');
+        expect(parseOutputLine(JSON.stringify({type: 'phase', phase: 'LOADING_MODEL'}), state)?.phase).toBe('LOADING_MODEL');
+        expect(parseOutputLine(JSON.stringify({type: 'done', output: '/tmp/book (2).m4b'}), state)?.outputPath).toBe('/tmp/book (2).m4b');
+    });
+});
