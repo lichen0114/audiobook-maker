@@ -164,6 +164,9 @@ pub const Book = struct {
     cur_chunk: u32 = 0,
     run_total_chunks: u32 = 0,
     chunk_ms: u32 = 0,
+    estimated_chunk_ms: f64 = 0,
+    timing_samples: u32 = 0,
+    last_progress_ms: u64 = 0,
     err: Str(200) = .{},
 
     fn displayTitle(self: *const Book) []const u8 {
@@ -327,8 +330,8 @@ pub const Model = struct {
         if (self.queue_paused and !self.converting) return "Queue paused · choose Create All to continue";
         if (self.converting) {
             const b = &self.books[self.active];
-            return std.fmt.allocPrint(arena, "Converting {s} — {s} · {d}%", .{
-                b.displayTitle(), if (b.model_message.len > 0) b.model_message.slice() else b.phase.label(), pctInt(b),
+            return std.fmt.allocPrint(arena, "Converting {s} — {s} · {d}% · {s}", .{
+                b.displayTitle(), if (b.model_message.len > 0) b.model_message.slice() else b.phase.label(), pctInt(b), remainingLabel(b, native_sdk.monotonicMs(), arena),
             }) catch "Converting…";
         }
         var ready: usize = 0;
@@ -410,6 +413,10 @@ pub const Model = struct {
     }
     pub fn selPct(self: *const Model) f32 {
         return if (self.sel()) |b| pct(b) else 0;
+    }
+    pub fn selEta(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        const b = self.sel() orelse return "";
+        return remainingLabel(b, native_sdk.monotonicMs(), arena);
     }
 
     pub fn pauseLabel(self: *const Model) []const u8 {
@@ -554,6 +561,34 @@ fn pct(b: *const Book) f32 {
 }
 fn pctInt(b: *const Book) u32 {
     return @intFromFloat(pct(b) * 100.0);
+}
+
+fn recordTiming(book: *Book, ms: u32) void {
+    if (ms == 0) return;
+    book.chunk_ms = ms;
+    const measured: f64 = @floatFromInt(ms);
+    book.estimated_chunk_ms = if (book.timing_samples == 0) measured else 0.25 * measured + 0.75 * book.estimated_chunk_ms;
+    book.timing_samples +|= 1;
+}
+
+fn remainingMs(book: *const Book, now: u64) ?u64 {
+    if (book.phase != .inference or book.timing_samples < 2 or book.run_total_chunks <= book.cur_chunk) return null;
+    const outstanding: f64 = @floatFromInt(book.run_total_chunks - book.cur_chunk);
+    const elapsed: f64 = @floatFromInt(now -| book.last_progress_ms);
+    // Never extrapolate an overlong current chunk into negative remaining time.
+    const ms = outstanding * book.estimated_chunk_ms - @min(elapsed, book.estimated_chunk_ms);
+    return @intFromFloat(@ceil(@max(0, ms)));
+}
+
+fn remainingLabel(book: *const Book, now: u64, arena: std.mem.Allocator) []const u8 {
+    if (book.stop_requested) return "Pausing…";
+    if (book.phase == .concatenating or book.phase == .exporting or book.phase == .done or
+        (book.phase == .inference and book.run_total_chunks > 0 and book.cur_chunk >= book.run_total_chunks)) return "Finishing audiobook…";
+    const ms = remainingMs(book, now) orelse return "Estimating time remaining…";
+    if (ms < 60000) return "Less than a minute of narration left";
+    const minutes = (ms + 59999) / 60000;
+    if (minutes >= 60) return std.fmt.allocPrint(arena, "About {d} h {d} min of narration left", .{ minutes / 60, minutes % 60 }) catch "Estimating time remaining…";
+    return std.fmt.allocPrint(arena, "About {d} min of narration left", .{minutes}) catch "Estimating time remaining…";
 }
 
 fn statusLine(b: *const Book, arena: std.mem.Allocator) []const u8 {
@@ -932,13 +967,15 @@ fn onLine(model: *Model, line: native_sdk.EffectLine) void {
     switch (ev) {
         .phase => |p| {
             b.phase = p;
+            if (p == .inference) b.last_progress_ms = native_sdk.monotonicMs();
             if (p == .inference or p == .exporting or p == .done) b.model_message.len = 0;
         },
         .progress => |pr| {
             b.cur_chunk = pr.current;
             b.run_total_chunks = pr.total;
+            b.last_progress_ms = native_sdk.monotonicMs();
         },
-        .timing => |ms| b.chunk_ms = ms,
+        .timing => |ms| recordTiming(b, ms),
         .model_progress => |progress| {
             if (progress.total > 0) {
                 var buf: [300]u8 = undefined;
@@ -1529,6 +1566,10 @@ fn startNextConvert(model: *Model, fx: *Effects) void {
             b.run_total_chunks = b.total_chunks;
             b.phase = .parsing;
             b.model_message.len = 0;
+            b.chunk_ms = 0;
+            b.estimated_chunk_ms = 0;
+            b.timing_samples = 0;
+            b.last_progress_ms = 0;
             model.active = i;
             model.selected = i;
             syncSelection(model);
@@ -2032,4 +2073,42 @@ test "selected conversion queues only the selected book and snapshots JSON" {
     const request = fx.pendingFileAt(0) orelse return error.MissingRequest;
     try std.testing.expect(std.mem.indexOf(u8, request.bytes, "two.epub") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.bytes, "--checkpoint") != null);
+}
+
+test "ETA waits for measured narration and ignores reused checkpoint progress" {
+    var book = Book{ .phase = .inference, .run_total_chunks = 100, .cur_chunk = 80, .last_progress_ms = 1000 };
+    try std.testing.expect(remainingMs(&book, 1000) == null);
+    recordTiming(&book, 1000);
+    try std.testing.expect(remainingMs(&book, 1000) == null);
+    recordTiming(&book, 1000);
+    try std.testing.expectEqual(@as(?u64, 20000), remainingMs(&book, 1000));
+}
+
+test "ETA smooths speed changes and counts down without going negative" {
+    var book = Book{ .phase = .inference, .run_total_chunks = 10, .cur_chunk = 2, .last_progress_ms = 5000 };
+    recordTiming(&book, 1000);
+    recordTiming(&book, 3000);
+    try std.testing.expectEqual(@as(f64, 1500), book.estimated_chunk_ms);
+    try std.testing.expectEqual(@as(?u64, 12000), remainingMs(&book, 5000));
+    try std.testing.expectEqual(@as(?u64, 11500), remainingMs(&book, 5500));
+    book.cur_chunk = 9;
+    try std.testing.expectEqual(@as(?u64, 0), remainingMs(&book, 99999));
+    recordTiming(&book, 0);
+    try std.testing.expectEqual(@as(u32, 2), book.timing_samples);
+}
+
+test "ETA formats approximate minutes and distinguishes final export and pause" {
+    const allocator = std.testing.allocator;
+    var book = Book{ .phase = .inference, .run_total_chunks = 10, .cur_chunk = 2, .last_progress_ms = 1000 };
+    recordTiming(&book, 10000);
+    recordTiming(&book, 10000);
+    const minutes = remainingLabel(&book, 1000, allocator);
+    defer allocator.free(minutes);
+    try std.testing.expectEqualStrings("About 2 min of narration left", minutes);
+    book.phase = .exporting;
+    try std.testing.expectEqualStrings("Finishing audiobook…", remainingLabel(&book, 1000, allocator));
+    book.phase = .loading_model;
+    try std.testing.expectEqualStrings("Estimating time remaining…", remainingLabel(&book, 1000, allocator));
+    book.stop_requested = true;
+    try std.testing.expectEqualStrings("Pausing…", remainingLabel(&book, 1000, allocator));
 }

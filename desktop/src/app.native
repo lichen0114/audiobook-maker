@@ -102,7 +102,7 @@
                 <text foreground="text_muted">{selAuthor}</text>
                 <text foreground="text_muted">{selMeta}</text>
                 <text foreground="text_muted">{selStatus}</text>
-                <if test="{selConverting}"><progress value="{selPct}"/></if>
+                <if test="{selConverting}"><progress value="{selPct}"/><text foreground="text_muted">{selEta}</text></if>
               </column>
             </row>
 

@@ -98,6 +98,7 @@ install if the Python venv, Kokoro, or FFmpeg are missing (`../setup.sh`).
   **Skip Current**, **Cancel Preview**, and **Retry This Book**. Pausing never
   starts the next book. Relaunch restores the library and inspects checkpoints;
   it does not automatically restart conversion.
+- Live narration time remaining, estimated from a smoothed average of completed speech segments. Estimates appear after two measured segments, update during generation, and switch to “Finishing audiobook…” for final export. Model downloads and export are not given fabricated time estimates.
 - Model preparation/loading phases and real download byte counts when the
   model host supplies a total, plus actionable per-book errors.
 - Missing-source relinking, native completion notification, and Reveal in Finder.
